@@ -1,5 +1,5 @@
-import { render } from "lit";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { nothing, render } from "lit";
+import { afterEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import type { ChatAttachment } from "../../lib/chat/chat-types.ts";
 import { resetChatViewState } from "./chat-view-state.ts";
 import { createChatProps } from "./chat-view.test-helpers.ts";
@@ -50,6 +50,9 @@ describe("chat comment pins", () => {
       },
     );
     const container = document.createElement("div");
+    onTestFinished(() => {
+      render(nothing, container);
+    });
     document.body.append(container);
     // A loading transcript stays static, so only pin inputs and observers vary.
     const props = createChatProps({ attachments: [comment("first")], loading: true });

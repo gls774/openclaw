@@ -333,7 +333,6 @@ function startTranscriptsAutoStartEntry(
     capture: OwnedCapture,
     params: Pick<
       Parameters<typeof startTranscripts>[0],
-      | "store"
       | "rawParams"
       | "abortSignal"
       | "existingSession"
@@ -349,6 +348,7 @@ function startTranscriptsAutoStartEntry(
         ...params,
         retry,
         ctx,
+        store,
         startupWaitMs: AUTO_START_PROVIDER_READY_TIMEOUT_MS,
         configuredLifecycle: true,
         lifecycleToken: capture.lifecycleToken,
@@ -394,7 +394,6 @@ function startTranscriptsAutoStartEntry(
           );
         }
         await startCapture(capture, {
-          store,
           sessionIdOrigin: entry.sessionId ? "supplied" : "generated",
           abortSignal: controller.signal,
           rawParams: { ...entry, title: futureTitle() },
@@ -514,7 +513,6 @@ function startTranscriptsAutoStartEntry(
           diagnosticToken = owned.lifecycleToken;
           capture = owned;
           const result = await startCapture(owned, {
-            store,
             sessionIdOrigin: "generated",
             abortSignal: controller.signal,
             existingSession: candidate?.session,

@@ -14,6 +14,7 @@ import { loadSettings, patchSettings } from "../../app/settings.ts";
 import { t } from "../../i18n/index.ts";
 import type { SessionCapability } from "../../lib/sessions/index.ts";
 import { createStorageMock } from "../../test-helpers/storage.ts";
+import { QUEUED_EDIT_RETENTION_CHANGE_EVENT } from "./chat-page-retained-sessions.ts";
 import { createMountedPanes } from "./chat-pane-mounted.test-support.ts";
 import {
   createGatewayBrowserClientFixture,
@@ -21,6 +22,7 @@ import {
   createTestChatPane,
   type TestChatPane,
 } from "./chat-pane.test-support.ts";
+import { enqueueChatMessage } from "./chat-queue.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
 import {
   dismissConfirmedActionPopovers,
@@ -28,6 +30,7 @@ import {
 } from "./components/chat-message-confirmation.ts";
 import * as chatThread from "./components/chat-thread-interactions.ts";
 import { handleChatDraftChange } from "./input-history.ts";
+import { beginQueuedMessageEdit, cancelQueuedMessageEdit } from "./queued-message-edit.ts";
 import { isSidebarSlotVisible, openSlot, setSidebarOpen } from "./sidebar-layout.ts";
 import { buildInitialChatSubmission } from "./user-message-content.ts";
 
@@ -45,6 +48,41 @@ function pendingSuggestion(sessionKey: string, id: string, text: string): Sessio
 
 const SKIP_REWIND_CONFIRM_PREFERENCE = "openclaw:skip-rewind-confirm";
 const confirmationOwners = new Set<HTMLElement>();
+
+it("publishes queued-edit retention changes while its pane is parked", async () => {
+  vi.useFakeTimers();
+  const key = "agent:main:parked-edit";
+  const fixture = createMountedPanes([{ key, kind: "direct", updatedAt: 1 }]);
+  const pane = fixture.mount(key);
+  const updates = vi.spyOn(pane, "performUpdate");
+  await pane.updateComplete;
+  expect(updates).toHaveBeenCalledTimes(1);
+  await vi.dynamicImportSettled();
+  await vi.advanceTimersByTimeAsync(160);
+  await vi.dynamicImportSettled();
+  await vi.advanceTimersByTimeAsync(160);
+  expect(pane.querySelector(".agent-chat__composer-combobox textarea")).not.toBeNull();
+  expect(pane.state.chatLoading).toBe(false);
+
+  pane.presented = false;
+  const retained = vi.fn();
+  pane.addEventListener(QUEUED_EDIT_RETENTION_CHANGE_EVENT, retained);
+  updates.mockClear();
+  const state = pane.state;
+  state.connected = false;
+  const queued = enqueueChatMessage(state, "queued original");
+  expect(queued).not.toBeNull();
+  expect(beginQueuedMessageEdit(state, queued!.id)).toBe("started");
+  state.requestUpdate();
+  expect(retained).toHaveBeenCalledTimes(1);
+  expect(cancelQueuedMessageEdit(state)).toBe(true);
+  state.requestUpdate();
+  expect(retained).toHaveBeenCalledTimes(2);
+  await Promise.resolve();
+  expect(updates).not.toHaveBeenCalled();
+  pane.presented = true;
+  await pane.updateComplete;
+});
 
 describe("chat pane composer prefill attention", () => {
   it.each([
@@ -745,34 +783,4 @@ describe("chat pane presentation teardown", () => {
       true,
     );
   });
-});
-
-it("settles boot and session-switch updates for freshly connected panes", async () => {
-  vi.useFakeTimers();
-  const keys = ["agent:main:frame-boot", "agent:main:frame-switch"];
-  const fixture = createMountedPanes(keys.map((key) => ({ key, kind: "direct", updatedAt: 1 })));
-  let previous: TestChatPane | undefined;
-  for (const [index, key] of keys.entries()) {
-    if (previous) {
-      Object.defineProperty(previous, "isConnected", { configurable: true, value: false });
-      previous.disconnectedCallback();
-    }
-    const pane = fixture.mount(key);
-    const updates = vi.spyOn(pane, "performUpdate");
-    await pane.updateComplete;
-    expect(updates).toHaveBeenCalledTimes(1);
-    await vi.dynamicImportSettled();
-    await vi.advanceTimersByTimeAsync(160);
-    await vi.dynamicImportSettled();
-    await vi.advanceTimersByTimeAsync(160);
-    console.info(
-      `${index === 0 ? "Fresh pane boot" : "Session switch"}: ${updates.mock.calls.length} updates`,
-    );
-    if (index === 0) {
-      expect(updates.mock.calls.length).toBeLessThanOrEqual(3);
-    }
-    expect(pane.querySelector(".agent-chat__composer-combobox textarea")).not.toBeNull();
-    expect(pane.state.chatLoading).toBe(false);
-    previous = pane;
-  }
 });

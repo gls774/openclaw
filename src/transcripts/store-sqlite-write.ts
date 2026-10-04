@@ -83,7 +83,7 @@ export function writeMeetingTranscriptSessionInDatabase(
     }
     sessionValues.metadata_json = metadata ? JSON.stringify(metadata) : null;
   }
-  executeSqliteQuerySync(
+  const written = executeSqliteQueryTakeFirstSync(
     database,
     meetingTranscriptDb(database)
       .insertInto("meeting_transcript_sessions")
@@ -102,15 +102,17 @@ export function writeMeetingTranscriptSessionInDatabase(
           ...sessionValues,
           updated_at_ms: now,
         }),
-      ),
+      )
+      .returning(["next_utterance_seq", "title", "source_json", "metadata_json", "stopped_at"]),
   );
-  // Return the tuple this transaction wrote, not a later reader's observation.
+  if (!written) {
+    throw new Error("Transcript session write did not return its stored revision");
+  }
+  // SQLite normalizes bound text. Return this write's persisted tuple, not its inputs
+  // or a later reader's observation after another writer can change the row.
   return {
     inserted: previous === undefined,
-    inputRevision: transcriptSummaryInputRevisionFromRow({
-      ...sessionValues,
-      next_utterance_seq: previous?.next_utterance_seq ?? 0,
-    }),
+    inputRevision: transcriptSummaryInputRevisionFromRow(written),
   };
 }
 

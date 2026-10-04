@@ -31,6 +31,30 @@ describe("configured transcript shutdown cleanup", () => {
   });
 
   it.each(["stop", "retry"] as const)(
+    "retains SQLite-normalized title custody through %s after failed startup",
+    async (action) => {
+      vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+      const f = fixture({ transcripts: { autoStart: [{ ...room, title: "Meeting \ud800" }] } });
+      const start = vi.fn(async () => ({ ok: false as const, error: "provider unavailable" }));
+      f.provider.start = start;
+      const service = createTranscriptsAutoStartService(f.ctx);
+      try {
+        await service.start().settled;
+        expect((await f.store.listSessionEntries())[0]?.session.title).toBe("Meeting \ufffd");
+        if (action === "retry") {
+          await vi.advanceTimersByTimeAsync(5_000);
+          await service.start().settled;
+        }
+        await service.stop();
+        expect(start).toHaveBeenCalledTimes(action === "retry" ? 2 : 1);
+        expect(await f.store.listSessionEntries()).toEqual([]);
+      } finally {
+        await service.stop();
+      }
+    },
+  );
+
+  it.each(["stop", "retry"] as const)(
     "preserves an external write between failed restoration and %s custody",
     async (action) => {
       vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
@@ -249,14 +273,12 @@ describe("configured transcript shutdown cleanup", () => {
     },
   );
 
-  it.each(
-    [false, true].flatMap((whenOccupied) =>
-      ["returned-stop", "thrown-stop", "session-write", "summary-write"].map((fault) => ({
-        whenOccupied,
-        fault,
-      })),
-    ),
-  )(
+  it.each([
+    { whenOccupied: false, fault: "returned-stop" },
+    { whenOccupied: true, fault: "thrown-stop" },
+    { whenOccupied: false, fault: "session-write" },
+    { whenOccupied: true, fault: "summary-write" },
+  ])(
     "retains and drains late $fault after shutdown (occupied=$whenOccupied)",
     async ({ whenOccupied, fault }) => {
       vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });

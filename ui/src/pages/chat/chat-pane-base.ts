@@ -43,6 +43,7 @@ import type { SwarmRosterHydrator } from "../../lib/sessions/swarm-roster.ts";
 import { SessionUnreadPatchGuard } from "../../lib/sessions/unread.ts";
 import { OpenClawLightDomElement } from "../../lit/openclaw-element.ts";
 import { PollController } from "../../lit/poll-controller.ts";
+import { PRESENTATION_CHANGED_EVENT } from "../../lit/presentation-binding.ts";
 import { SubscriptionsController } from "../../lit/subscriptions-controller.ts";
 import { ChatComposerCapabilityHost } from "./chat-composer-capability-host.ts";
 import {
@@ -50,7 +51,11 @@ import {
   CHAT_RUN_ACTIVITY_CHANGED_EVENT,
   CHAT_TRANSCRIPT_LOADING_CHANGED_EVENT,
 } from "./chat-history-events.ts";
-import { getAcceptedChatHistorySession, getChatHistoryLoadState } from "./chat-history-state.ts";
+import {
+  getAcceptedChatHistorySession,
+  getChatHistoryLoadState,
+  isChatHistoryRetrying,
+} from "./chat-history-state.ts";
 import { sameChatPanePresence } from "./chat-pane-presence.ts";
 import type { PendingSessionPanelToggle } from "./chat-pane-session-panel-toggle.ts";
 import type { ChatPaneConnectionScope, PaneSessionChangeOptions } from "./chat-pane-shared.ts";
@@ -79,9 +84,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   // The first Lit update must render even while hidden; later hidden work parks.
   // Disconnect releases the waiter so reconnect can schedule in its new lifecycle.
   private hiddenUpdateResume: (() => void) | undefined;
-  private updateFrame: number | undefined;
-  private frameUpdateResume: (() => void) | undefined;
-  private immediateUpdate = false;
   private readonly handleVisibilityChange = () => {
     // Lit parks hidden updates, but progress watches must follow visibility immediately.
     this.progressCard.hostUpdate();
@@ -89,7 +91,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
       this.hiddenUpdateResume?.();
       return;
     }
-    this.releaseUpdateFrame();
     const state = this.state;
     if (!state) {
       return;
@@ -116,51 +117,16 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.paneLifecycleRoot?.dispatchEvent(new Event(CHAT_PANE_LIFECYCLE_CHANGED_EVENT));
   }
   protected override async scheduleUpdate() {
-    while (this.hasUpdated && this.isConnected) {
-      if (document.visibilityState === "hidden") {
-        await new Promise<void>((resolve) => {
-          this.hiddenUpdateResume = resolve;
-        });
-      } else if (!this.immediateUpdate && this.updateFrame !== undefined) {
-        // Keep Lit's pending update (and changed properties) until the frame opens.
-        await new Promise<void>((resolve) => {
-          this.frameUpdateResume = resolve;
-        });
-      } else {
-        break;
-      }
-    }
-    this.immediateUpdate = false;
-    await super.scheduleUpdate();
-    if (
+    while (
+      this.hasUpdated &&
       this.isConnected &&
-      document.visibilityState !== "hidden" &&
-      typeof requestAnimationFrame === "function" &&
-      this.updateFrame === undefined
+      (document.visibilityState === "hidden" || !this.presented)
     ) {
-      this.updateFrame = requestAnimationFrame(() => {
-        this.updateFrame = undefined;
-        this.frameUpdateResume?.();
-        this.frameUpdateResume = undefined;
+      await new Promise<void>((resolve) => {
+        this.hiddenUpdateResume = resolve;
       });
     }
-  }
-
-  /** Scroll offsets and their virtual rows must commit together before paint. */
-  requestImmediateUpdate(): void {
-    this.immediateUpdate = true;
-    this.frameUpdateResume?.();
-    this.frameUpdateResume = undefined;
-    this.requestUpdate();
-  }
-
-  private releaseUpdateFrame(): void {
-    if (this.updateFrame !== undefined) {
-      cancelAnimationFrame(this.updateFrame);
-      this.updateFrame = undefined;
-    }
-    this.frameUpdateResume?.();
-    this.frameUpdateResume = undefined;
+    await super.scheduleUpdate();
   }
 
   override disconnectedCallback() {
@@ -170,7 +136,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     );
     this.context?.connectionBootstrap.setForegroundPane(this, null);
     this.hiddenUpdateResume?.();
-    this.releaseUpdateFrame();
+    this.hiddenUpdateResume = undefined;
     document.removeEventListener("visibilitychange", this.handleVisibilityChange);
     super.disconnectedCallback();
     // A removed Home pane cannot bubble its final loading edge. Notify its
@@ -191,6 +157,8 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   );
   @consume({ context: applicationContext, subscribe: true })
   protected context!: ApplicationContext;
+  @property({ attribute: false })
+  mcpAppLaunch?: import("../../components/mcp-app-launch.ts").McpAppOpenDetail;
   @property({ attribute: false }) paneId = "single";
   @property({ attribute: false }) paneLabel?: string;
   @property({ attribute: false }) presentationId = "single";
@@ -204,6 +172,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   @property({ attribute: false }) agentId?: string;
   @property({ attribute: false }) inputRegion: ChatInputRegion = "page";
   @property({ attribute: false }) compact = false;
+  @property({ attribute: false }) onBackToSubagents?: () => void;
   @property({ attribute: false }) workContext?: ChatWorkContext;
   // Route ownership settles after retained-pane preview; dashboard activity follows
   // the pane the user can already see so its warmed runtime paints immediately.
@@ -219,6 +188,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     }
     const wasConversationPresented = this.conversationPresented;
     this.visuallyPresentedValue = value;
+    this.dispatchEvent(new Event(PRESENTATION_CHANGED_EVENT));
     this.requestUpdate("visuallyPresented", previous);
     this.notifyConversationPresentation(wasConversationPresented);
   }
@@ -252,6 +222,11 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     const wasConversationPresented = this.conversationPresented;
     this.headerPresentationGeneration += 1;
     this.presentedValue = value;
+    if (value) {
+      this.hiddenUpdateResume?.();
+      this.hiddenUpdateResume = undefined;
+    }
+    this.dispatchEvent(new Event(PRESENTATION_CHANGED_EVENT));
     this.progressCard.hostUpdate();
     this.requestUpdate("presented", previous);
     this.presentedChanged(value);
@@ -263,6 +238,14 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   get transcriptLoading(): boolean {
     const phase = this.state ? getChatHistoryLoadState(this.state).phase : "idle";
     return phase === "pending-connection" || phase === "in-flight";
+  }
+  /** Scoped transient recovery is presented once in the shell connection indicator. */
+  get historyRecovering(): boolean {
+    return Boolean(
+      this.state &&
+      this.state.client === this.context?.gateway.snapshot.client &&
+      isChatHistoryRetrying(this.state),
+    );
   }
   /** The initial authoritative transcript has a visible result, including errors. */
   get transcriptReady(): boolean {
@@ -359,6 +342,7 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   protected readonly chatState = new ChatStateController<ChatPageHost>(
     this,
     () => {
+      this.syncQueuedEditRetention();
       const activity = this.runActivity;
       if (
         activity?.client === this.publishedRunActivity?.client &&
@@ -392,7 +376,6 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
     this.requestUpdate(),
   );
   protected readonly transcript = new ChatTranscriptController(this, () => this.paneId, {
-    requestImmediateUpdate: () => this.requestImmediateUpdate(),
     visuallyPresented: () => this.visuallyPresented,
     onViewportResize: () => this.chatState.handleTranscriptResize(),
     canFollowEnd: () => this.state !== undefined && canAutoFollowChat(this.state),
@@ -659,4 +642,5 @@ export abstract class ChatPaneBase extends OpenClawLightDomElement {
   protected abstract cancelHeaderRename(): void;
   protected abstract handleArchiveSessionShortcut(event: KeyboardEvent): boolean;
   protected abstract resetOlderMessagesViewport(): void;
+  protected abstract syncQueuedEditRetention(): void;
 }

@@ -46,7 +46,7 @@ import { normalizeAskUserParams, reserveAskUserPromptDelivery } from "./tools/as
 import { createSecretsTool } from "./tools/secrets-tool.js";
 import { markCoreTtsToolResult } from "./tools/tts-tool-result-provenance.js";
 
-// Prompt readiness has a default dispatcher separate from each executor fixture.
+// mock-isolation: Keep prompt-readiness RPCs on the fixture, never the operator Gateway.
 vi.mock("./harness/gateway-question-dispatch.runtime.js", () => ({
   callGatewayTool: async (method: string) => {
     if (method !== "question.list") {

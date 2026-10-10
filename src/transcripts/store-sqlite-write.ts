@@ -17,7 +17,7 @@ import {
   meetingTranscriptSessionQuery,
   parseOptionalJsonRecord,
   type MeetingTranscriptSessionRow,
-  readTranscriptSummaryInputRevision,
+  transcriptSessionInputRevisionFromRow,
   readStoredTranscriptSummaryRevision,
   sessionFromRow,
   transcriptSummaryInputRevisionFromRow,
@@ -40,17 +40,6 @@ type TranscriptSummaryValues = Pick<
   "generated_at" | "summary_json" | "markdown" | "utterance_count"
 >;
 
-function assertMeetingTranscriptSelectorAvailableInDatabase(
-  database: DatabaseSync,
-  session: Pick<TranscriptSessionDescriptor, "sessionId" | "startedAt">,
-  selector: string,
-): void {
-  const owner = readTranscriptCanonicalSessionRow(database, selector);
-  if (owner && (owner.session_id !== session.sessionId || owner.started_at !== session.startedAt)) {
-    throw new TranscriptSessionConflictError();
-  }
-}
-
 export function writeMeetingTranscriptSessionInDatabase(
   database: DatabaseSync,
   params: {
@@ -58,20 +47,26 @@ export function writeMeetingTranscriptSessionInDatabase(
     sessionValues: TranscriptSessionValues;
     now: number;
     expectedInputRevision?: string;
+    expectedSessionRevision?: string;
   },
-): { inserted: boolean; inputRevision: string } {
-  const { session, sessionValues, now, expectedInputRevision } = params;
-  if (
-    expectedInputRevision !== undefined &&
-    readTranscriptSummaryInputRevision(database, session) !== expectedInputRevision
-  ) {
-    throw new TranscriptsSummaryChangedError();
-  }
-  assertMeetingTranscriptSelectorAvailableInDatabase(database, session, sessionValues.selector);
+): { inserted: boolean; inputRevision: string; sessionRevision: string } {
+  const { session, sessionValues, now, expectedInputRevision, expectedSessionRevision } = params;
   const previous = executeSqliteQueryTakeFirstSync(
     database,
     meetingTranscriptSessionQuery(database, session).selectAll(),
   );
+  if (
+    (expectedInputRevision !== undefined &&
+      (!previous || transcriptSummaryInputRevisionFromRow(previous) !== expectedInputRevision)) ||
+    (expectedSessionRevision !== undefined &&
+      (!previous || transcriptSessionInputRevisionFromRow(previous) !== expectedSessionRevision))
+  ) {
+    throw new TranscriptsSummaryChangedError();
+  }
+  const owner = readTranscriptCanonicalSessionRow(database, sessionValues.selector);
+  if (owner && (owner.session_id !== session.sessionId || owner.started_at !== session.startedAt)) {
+    throw new TranscriptSessionConflictError();
+  }
   if (previous) {
     // ID origin belongs to admission, including the absence of that fact in legacy rows.
     const admittedMetadata = sessionFromRow(previous).metadata;
@@ -113,6 +108,7 @@ export function writeMeetingTranscriptSessionInDatabase(
   return {
     inserted: previous === undefined,
     inputRevision: transcriptSummaryInputRevisionFromRow(written),
+    sessionRevision: transcriptSessionInputRevisionFromRow(written),
   };
 }
 

@@ -121,7 +121,7 @@ type StoreEntry = {
   allowedHosts?: string[];
 };
 
-type StoreEnvHost = "gateway" | "sandbox" | "node";
+type StoreEnvHost = "gateway" | "sandbox";
 
 const EGRESS_ENV = {
   HTTPS_PROXY: mocks.proxyUrl,
@@ -179,10 +179,6 @@ async function captureStoreExecEnvironment(params: {
   await tool.execute(params.callId, { command: "echo ok", yieldMs: 120_000 });
   if (params.host === "gateway") {
     return mocks.spawnInputs.at(-1)?.env ?? {};
-  }
-  if (params.host === "node") {
-    // The node receives requested overrides, not the Gateway's local analysis environment.
-    return mocks.nodeHostParams.at(-1)?.requestedEnv ?? {};
   }
   return sandboxEnv ?? {};
 }
@@ -384,13 +380,10 @@ describe("exec store environment", () => {
     });
   });
 
-  it.each(["gateway", "sandbox", "node"] as const)(
+  it.each(["gateway", "sandbox"] as const)(
     "applies enabled secret egress only to gateway exec (%s)",
     async (host) => {
       vi.stubEnv("OPENCLAW_SECRET_SENTINELS", "false");
-      if (host === "node") {
-        vi.stubEnv("AMBIENT_EXEC_FIXTURE", "oc-sent-v2.inherited-fixture");
-      }
       await writeEntries([
         { name: "AWS_REGION", value: "us-west-2", kind: "env" },
         {

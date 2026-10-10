@@ -292,7 +292,7 @@ export function resolveTranscriptSourceOwnership(params: {
   const providerSource = ownership
     ? { ...sourceForResolution, accountId: resolvedAccountId }
     : sourceForResolution;
-  if (params.configuredLifecycle && ownership && !providerSource.accountId?.trim()) {
+  if (params.configuredLifecycle && ownership && !resolvedAccountId) {
     throw new Error(
       `transcripts provider ${params.provider.id} could not resolve an account for configured auto-start`,
     );
@@ -508,19 +508,17 @@ export async function startTranscripts(params: {
     };
   }
   startingSessions.set(session.sessionId, entry);
-  let admitted = false;
-  let inserted = false;
+  let admission: Awaited<ReturnType<TranscriptsStore["writeSession"]>> | undefined;
   let retry: TranscriptStartError["retry"];
   try {
     try {
-      ({ inserted } = await params.store.writeSession(session, existingSessionCondition));
+      admission = await params.store.writeSession(session, existingSessionCondition);
     } catch (error) {
       if (error instanceof TranscriptsSummaryChangedError) {
         throw new TranscriptStartError("id-conflict", error);
       }
       throw error;
     }
-    admitted = true;
     // A new capture admission adopts this row even if startup later restores the
     // exact stopped tuple. Only continuation of its own live retry keeps custody.
     if (!params.retry) {
@@ -674,14 +672,21 @@ export async function startTranscripts(params: {
       }
       // Failed reopening must not erase the durable stop time: the next bounded
       // attempt still needs to find this same meeting, not create an empty sibling.
-      if (entry.phase === "failed") {
+      if (entry.phase === "failed" && admission) {
         const restored = existingSession ?? {
           ...session,
           stoppedAt: new Date().toISOString(),
         };
-        const { inputRevision } = await params.store.writeSession(restored);
+        const { inputRevision } = await params.store.writeSession(restored, {
+          // Accepted speech may advance the summary revision; metadata custody must not change.
+          expectedSessionRevision: admission.sessionRevision,
+        });
         // The write receipt binds authority before another writer can change the row.
-        retry = { session: restored, revision: inputRevision, discardOnAbandon: inserted };
+        retry = {
+          session: restored,
+          revision: inputRevision,
+          discardOnAbandon: admission.inserted,
+        };
       }
     } catch (cleanupError) {
       failure = settlementFailed
@@ -691,10 +696,10 @@ export async function startTranscripts(params: {
     }
     // Cleanup and restoration failures remain terminal admissions, never authority
     // to start another provider behind retained cleanup or an unrestored tuple.
-    if (!admitted && failure instanceof TranscriptSessionConflictError) {
+    if (!admission && failure instanceof TranscriptSessionConflictError) {
       throw new TranscriptStartError("id-conflict", failure);
     }
-    throw admitted ? new TranscriptStartError("admitted-start-failed", failure, retry) : failure;
+    throw admission ? new TranscriptStartError("admitted-start-failed", failure, retry) : failure;
   } finally {
     startupAbort.detach();
     try {

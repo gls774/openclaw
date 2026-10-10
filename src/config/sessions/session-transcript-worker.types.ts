@@ -7,10 +7,7 @@ import type {
 } from "../../../packages/memory-host-sdk/src/host/session-files.js";
 import type { BoardReadOperations } from "../../boards/sqlite-board-operations.js";
 import type { PreparedSessionHistoryReadTarget } from "../../gateway/session-history-read.types.js";
-import type {
-  SessionRowTranscriptFields,
-  SessionRowTranscriptReadParams,
-} from "../../gateway/session-row-transcript-backfill.types.js";
+import type { SessionRowTranscriptFields } from "../../gateway/session-row-transcript-backfill.types.js";
 import type { SessionPreviewItem, SessionTitleFields } from "../../gateway/session-utils.types.js";
 import type { SessionMemoryTranscript } from "../../hooks/bundled/session-memory/capture.types.js";
 import type { SessionCostUsageCacheReadResult } from "../../infra/session-cost-usage-cache-read.js";
@@ -23,10 +20,7 @@ import type {
   TrajectoryRetentionWorkerInput,
   TrajectoryRuntimeRetentionPlan,
 } from "../../trajectory/runtime-retention.contract.js";
-import type {
-  SessionActivitySummaryBatchInput,
-  SessionActivitySummaryBatchResult,
-} from "./activity-summary-source.types.js";
+import type { SessionActivitySummaryBatchResult } from "./activity-summary-source.types.js";
 import type {
   SessionCleanupReadInput,
   SessionCleanupReadResult,
@@ -65,11 +59,7 @@ import type {
 import type { readSessionTranscriptModelContext } from "./session-accessor.sqlite-model-context.js";
 import type { listSessionPendingInputReceipts } from "./session-accessor.sqlite-pending-input-receipts.js";
 import type { SessionTranscriptWatermark } from "./session-accessor.sqlite-transcript-watermark-read.js";
-import type {
-  SessionAccessScope,
-  SessionEntryReadScope,
-  SessionTranscriptReadScope,
-} from "./session-accessor.types.js";
+import type { SessionAccessScope, SessionEntryReadScope } from "./session-accessor.types.js";
 import type { CanonicalSessionReaderContinuation } from "./session-canonical-key.js";
 import type {
   SessionEntryCurrentFacts,
@@ -147,6 +137,9 @@ import type {
 import type { SessionTranscriptSearchResult } from "./session-transcript-search.types.js";
 import type { SessionTranscriptWorkerReadError } from "./session-transcript-worker-error.types.js";
 import type {
+  SessionTitleFieldsWorkerInput,
+  SessionActivitySummarySourceWorkerInput,
+  SessionRowBackfillWorkerInput,
   BoardSnapshotWorkerInput,
   BoardWidgetDocumentWorkerInput,
   SessionHistoricalEvictionCandidatesWorkerInput,
@@ -234,26 +227,6 @@ export type SessionPreviewWorkerInput = {
   maxItems: number;
   maxChars: number;
   admission?: UserTurnTranscriptAdmissionReceipt;
-};
-
-type SessionTitleFieldsWorkerInput = {
-  kind: "session-title-fields";
-  database: { agentId: string; path: string };
-  scope: SessionTranscriptReadScope;
-  includeInterSession?: boolean;
-  admission?: UserTurnTranscriptAdmissionReceipt;
-};
-
-type SessionActivitySummarySourceWorkerInput = SessionActivitySummaryBatchInput & {
-  kind: "session-activity-summary-source";
-  database: { agentId: string; path: string };
-  admission?: UserTurnTranscriptAdmissionReceipt;
-};
-
-type SessionRowBackfillWorkerInput = {
-  kind: "session-row-backfill";
-  database: { agentId: string; path: string };
-  params: SessionRowTranscriptReadParams;
 };
 
 export type SessionRowPresenceWorkerInput = {

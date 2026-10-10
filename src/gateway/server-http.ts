@@ -119,8 +119,7 @@ import {
   type NodeWorkspaceTransferHttpCallback,
 } from "./worker-environments/node-workspace-transfer-http.js";
 
-type WatchNodeHttpRequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
-type McpOAuthCallbackHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
+type GatewayHttpRequestHandler = (req: IncomingMessage, res: ServerResponse) => Promise<boolean>;
 
 type GatewayHttpRequestStage = () => Promise<boolean> | boolean;
 
@@ -134,8 +133,8 @@ export function createGatewayHttpServer(opts: {
   openAiChatCompletionsEnabled?: boolean;
   openResponsesEnabled?: boolean;
   handleHooksRequest: HooksRequestHandler;
-  handleMcpOAuthCallbackRequest?: McpOAuthCallbackHandler;
-  handleWatchNodeRequest?: WatchNodeHttpRequestHandler;
+  handleMcpOAuthCallbackRequest?: GatewayHttpRequestHandler;
+  handleWatchNodeRequest?: GatewayHttpRequestHandler;
   handlePluginRequest?: PluginHttpRequestHandler;
   shouldEnforcePluginGatewayAuth?: (pathContext: PluginRoutePathContext) => boolean;
   isPluginAuthenticatedRoute?: (pathContext: PluginRoutePathContext) => boolean;
@@ -412,8 +411,7 @@ export function createGatewayHttpServer(opts: {
       const addAdmittedStage = (enabled: boolean, stage: GatewayHttpRequestStage) =>
         addRequestStage(enabled, stage, true);
 
-      const workerGatewayRoute = classifyWorkerGatewayPath(scopedRequestPath);
-      addRequestStage(workerGatewayRoute !== "outside", () => {
+      addRequestStage(classifyWorkerGatewayPath(scopedRequestPath) !== "outside", () => {
         respondNotFound(res);
         return true;
       });

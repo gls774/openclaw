@@ -50,6 +50,7 @@ import { isIncognitoEntryCreationCommand } from "./session-incognito-entry-creat
 import { createIncognitoEntryCreationWorker } from "./session-incognito-entry-creation.worker.js";
 import { isIncognitoEntryPatchCommand } from "./session-incognito-entry-patch-contract.js";
 import { createIncognitoEntryPatchWorker } from "./session-incognito-entry-patch.worker.js";
+import { projectIncognitoSessionSteeringFacts } from "./session-incognito-facts.js";
 import {
   incognitoHistoryKeys,
   isIncognitoHistoryCommand,
@@ -138,56 +139,7 @@ export function createIncognitoSessionWorker(
                 pendingProjectGitUrl: entry.pendingProjectGitUrl,
               }
             : undefined,
-          steering: entry
-            ? {
-                lifecycleRevision: entry.lifecycleRevision,
-                restartRecoveryHarnessCompletion: entry.restartRecoveryHarnessCompletion,
-                restartRecoveryTerminalDeliveryEvidence:
-                  entry.restartRecoveryTerminalDeliveryEvidence?.map((receipt) => ({
-                    runId: receipt.runId,
-                    harnessCompletion: receipt.harnessCompletion,
-                    deliveryContext: receipt.deliveryContext,
-                    payloads: receipt.payloads?.map(({ visible }) => ({ visible })),
-                    payloadsTruncated: receipt.payloadsTruncated,
-                    deliveryStatus: receipt.deliveryStatus && {
-                      status: receipt.deliveryStatus.status,
-                      resultCount: receipt.deliveryStatus.resultCount,
-                    },
-                    messagingToolSentTargets: receipt.messagingToolSentTargets?.map(
-                      ({
-                        provider,
-                        accountId,
-                        to,
-                        threadId,
-                        threadImplicit,
-                        threadSuppressed,
-                        visible,
-                        sourceReplyFinal,
-                      }) => ({
-                        provider,
-                        accountId,
-                        to,
-                        threadId,
-                        threadImplicit,
-                        threadSuppressed,
-                        visible,
-                        sourceReplyFinal,
-                      }),
-                    ),
-                    messagingToolSentTargetsTruncated: receipt.messagingToolSentTargetsTruncated,
-                    messagingToolAggregateEvidenceUnaccounted:
-                      receipt.messagingToolAggregateEvidenceUnaccounted,
-                  })),
-                sessionId: entry.sessionId,
-                updatedAt: entry.updatedAt,
-                status: entry.status,
-                restartRecoveryDeliveryRunId: entry.restartRecoveryDeliveryRunId,
-                restartRecoveryDeliverySourceRunId: entry.restartRecoveryDeliverySourceRunId,
-                restartRecoveryDeliveryReceiptState: entry.restartRecoveryDeliveryReceiptState,
-                restartRecoveryDeliveryToolCallId: entry.restartRecoveryDeliveryToolCallId,
-                restartRecoveryTerminalRunIds: entry.restartRecoveryTerminalRunIds,
-              }
-            : undefined,
+          steering: entry ? projectIncognitoSessionSteeringFacts(entry) : undefined,
           sharing: entry
             ? {
                 entry: projectSessionSharingEntry(entry),

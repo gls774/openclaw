@@ -1,12 +1,6 @@
-import { resolveIntegerOption } from "@openclaw/normalization-core/number-coercion";
-import { asOptionalRecord } from "@openclaw/normalization-core/record-coerce";
 import { prepareSessionHistorySubagentFacts } from "../../gateway/session-history-delta-visibility.js";
 import { createBoundSessionHistorySubagentProjection } from "../../gateway/session-history-readonly-reader.js";
 import { selectSessionTranscriptProjection } from "../../gateway/session-transcript-read-kernel.js";
-import {
-  SOURCE_PAGE_MAX_BYTES,
-  SOURCE_PAGE_MAX_MESSAGES,
-} from "../../gateway/session-transcript-source-pages.js";
 import { resolveGatewaySessionStoreReadSources } from "../../gateway/session-utils-store-sources.js";
 import type { SqliteWorkerCommand } from "../../infra/sqlite-worker-contract.js";
 import { isIncognitoSessionKey } from "../../shared/incognito-session-key.js";
@@ -29,11 +23,6 @@ import {
   readTranscriptExportSnapshotReadOnlySync,
 } from "./session-accessor.sqlite-read.js";
 import {
-  iterateVisibleMessageMetadata,
-  readVisibleMessageRange,
-  resolveVisibleMessagePositions,
-} from "./session-accessor.sqlite-reset-window.js";
-import {
   hasSessionTranscriptMessageInDatabase,
   readLatestAssistantTextFromDatabase,
 } from "./session-accessor.sqlite-transcript-metadata-read.js";
@@ -49,6 +38,7 @@ import type {
 } from "./session-incognito-contract.js";
 import type { IncognitoHistoryOperations } from "./session-incognito-history-contract.js";
 import { resolveIncognitoHistoryProjectionSelection } from "./session-incognito-history-selection.js";
+import { readIncognitoHistorySourcePage } from "./session-incognito-history-source.worker.js";
 import { readPendingInputHistoryInDatabase } from "./session-pending-input-history.kernel.js";
 import { readSessionTranscriptAccountingFromProjection } from "./session-transcript-accounting.js";
 import {
@@ -486,42 +476,8 @@ export function createIncognitoHistoryWorker(
       case "session.history.visitor-source":
         prepared = prepareHistoryRead(command.type, () =>
           runWithSessionTranscriptReadFence(admission, () => {
-            const snapshot = readCurrentProjectionSnapshot(
-              database,
-              resolvedScope,
-              (projection) => {
-                const { total } = resolveVisibleMessagePositions(projection);
-                const start = resolveIntegerOption(command.input.offset, 0, { min: 0, max: total });
-                let end = start;
-                let bytes = 0;
-                for (const row of iterateVisibleMessageMetadata(
-                  projection,
-                  start,
-                  Math.min(total, start + SOURCE_PAGE_MAX_MESSAGES),
-                )) {
-                  if (row.serialized_bytes > SOURCE_PAGE_MAX_BYTES) {
-                    throw new Error(
-                      `Transcript source message exceeds the ${SOURCE_PAGE_MAX_BYTES}-byte page limit`,
-                    );
-                  }
-                  if (bytes + row.serialized_bytes > SOURCE_PAGE_MAX_BYTES) {
-                    break;
-                  }
-                  bytes += row.serialized_bytes;
-                  end++;
-                }
-                if (end === start && start < total) {
-                  throw new Error("Transcript visitor page is incomplete");
-                }
-                const events = readVisibleMessageRange(projection, start, end);
-                return {
-                  ...(end < total ? { nextOffset: end } : {}),
-                  messages: events.flatMap(({ event, seq }) => {
-                    const message = asOptionalRecord(event)?.message;
-                    return message === undefined ? [] : [{ message, seq }];
-                  }),
-                };
-              },
+            const snapshot = readCurrentProjectionSnapshot(database, resolvedScope, (projection) =>
+              readIncognitoHistorySourcePage(projection, command.input.offset),
             );
             if (snapshot.kind === "unavailable") {
               throw new SessionTranscriptProjectionUnavailableError(sessionId);

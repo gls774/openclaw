@@ -1,8 +1,10 @@
 import type { BoardReadOperations } from "../../boards/sqlite-board-operations.js";
+import type { SessionRowTranscriptReadParams } from "../../gateway/session-row-transcript-backfill.types.js";
 import type { SessionCostUsageCacheRead } from "../../infra/session-cost-usage-cache-read.js";
 import type { DatabaseFileIdentity } from "../../infra/sqlite-worker-identity.js";
 import type { UserTurnTranscriptAdmissionReceipt } from "../../sessions/user-turn-transcript.types.js";
 import type { VoiceSessionLookup } from "../../talk/client-voice-session-store.js";
+import type { SessionActivitySummaryBatchInput } from "./activity-summary-source.types.js";
 import type { ArchivedSessionEvictionQuery } from "./disk-budget.types.js";
 import type {
   SessionTranscriptRawDeltaLimits,
@@ -156,4 +158,24 @@ export type SessionUsageCacheWorkerInput = {
   database: { agentId: string; path: string };
   request: SessionCostUsageCacheRead;
   env: NodeJS.ProcessEnv;
+};
+
+export type SessionTitleFieldsWorkerInput = {
+  kind: "session-title-fields";
+  database: { agentId: string; path: string };
+  scope: SessionTranscriptReadScope;
+  includeInterSession?: boolean;
+  admission?: UserTurnTranscriptAdmissionReceipt;
+};
+
+export type SessionActivitySummarySourceWorkerInput = SessionActivitySummaryBatchInput & {
+  kind: "session-activity-summary-source";
+  database: { agentId: string; path: string };
+  admission?: UserTurnTranscriptAdmissionReceipt;
+};
+
+export type SessionRowBackfillWorkerInput = {
+  kind: "session-row-backfill";
+  database: { agentId: string; path: string };
+  params: SessionRowTranscriptReadParams;
 };

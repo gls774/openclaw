@@ -67,7 +67,7 @@ async function readProcessHeldCliHistoryQuery(
   const params = history.params;
   params.encodeResponse = false;
   const [{ runProcessHeldHistoryTask }, readers] = await Promise.all([
-    import("../config/sessions/session-transcript-worker-runtime.js"),
+    import("../config/sessions/session-transcript-worker-process-held.js"),
     incognito?.readers ?? import("./session-transcript-readers.js"),
   ]);
   const scope = {

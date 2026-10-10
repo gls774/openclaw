@@ -15,7 +15,6 @@ import { emitSessionLifecycleEvent } from "../../../sessions/session-lifecycle-e
 import { AgentDatabaseAdmissionError } from "../../../state/agent-database-admission.js";
 import { captureOpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../../../state/openclaw-state-worker-context.types.js";
-import { resolveSubagentRequesterAgentId } from "../../subagent-requester-owner.js";
 import { applySubagentLaunchAuthorization } from "../spawn/subagent-launch-authorization.js";
 import { retrySubagentCleanup } from "../spawn/subagent-spawn-cleanup.js";
 import { readGatewayRunId } from "../spawn/subagent-spawn-gateway.js";
@@ -23,7 +22,6 @@ import { resolveSwarmConfig } from "../swarm/swarm-config.js";
 import { bindSwarmRunReservation, enqueueSwarmRun } from "../swarm/swarm-scheduler.js";
 import { shouldSuppressSubagentRecoverySessionEffects } from "./subagent-recovery-state.js";
 import { callSubagentRegistryGateway } from "./subagent-registry-deps.js";
-import { updateSubagentArchiveAtMs } from "./subagent-registry-helpers.js";
 import type { SubagentLifecycleOptions } from "./subagent-registry-lifecycle-context.js";
 import type { SubagentLifecycleController } from "./subagent-registry-lifecycle.js";
 import {
@@ -38,6 +36,7 @@ import {
 import { getLatestSubagentRunForChild } from "./subagent-registry-queries.js";
 import type { SubagentRunReadRecord } from "./subagent-registry-read.types.js";
 import { isRetiredSubagentSessionOwner } from "./subagent-registry-restart-recovery-helpers.js";
+import { prepareRestoredSubagentRunMetadata } from "./subagent-registry-restore-metadata.js";
 import { settleRestoredRequesterTurns } from "./subagent-registry-restore-requester.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
 import { getSubagentRunRuntimeKey, isSameSubagentRunOwner } from "./subagent-run-generation.js";
@@ -511,21 +510,7 @@ export function createSubagentRegistryRestorer(config: {
         const cfg = getRuntimeConfig();
         await mutateSubagentRuns(
           [...runs.keys()],
-          (rows) => {
-            const postimages = new Map<string, SubagentRunRecord>();
-            for (const [runId, entry] of rows) {
-              const draft = { ...entry };
-              const requesterAgentId = resolveSubagentRequesterAgentId(cfg, draft);
-              const ownerChanged = !draft.requesterAgentId && requesterAgentId !== undefined;
-              if (ownerChanged) {
-                draft.requesterAgentId = requesterAgentId;
-              }
-              if (updateSubagentArchiveAtMs(draft, cfg) || ownerChanged) {
-                postimages.set(runId, draft);
-              }
-            }
-            return { value: undefined, postimages };
-          },
+          (rows) => prepareRestoredSubagentRunMetadata(rows, cfg),
           { runs, context: stateContext, assertCurrent },
         );
         assertCurrent();

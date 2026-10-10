@@ -1,5 +1,5 @@
 import { boundSessionDiagnosticText } from "../config/sessions/session-diagnostic-text.js";
-import { withSessionDiagnosticTextInWorker } from "../config/sessions/session-entry-read-runtime.js";
+import { withSessionDiagnosticTextInWorker } from "../config/sessions/session-entry-read-maintenance.js";
 import { prepareCronJobNameResolver } from "../cron/store/job-name.js";
 import { areDiagnosticsEnabledForProcess } from "../infra/diagnostic-events.js";
 import {

@@ -304,6 +304,7 @@ it.for([false, true])(
         await withinTest(apiKeyListing.started.promise, signal);
         const apiKeyPending = await list();
         apiKeyListing.release.resolve();
+        expect(apiKeyPending.result.pendingProviders).toContain(provider);
         expect(apiKeyPending.ids).toEqual(["known-chat"]);
         const apiKeyFailed = await waitForCatalogPublication({
           signal,

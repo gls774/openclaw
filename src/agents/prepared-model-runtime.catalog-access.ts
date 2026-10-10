@@ -194,7 +194,9 @@ export async function createFullModelCatalogAccess(
     configuredRuntimeModels: Publication["configuredRuntimeModels"],
     acquiredNative: boolean,
   ): Publication => {
-    const catalog = project(nextInventory.catalog, configuredRuntimeModels);
+    const catalog = attempt.withRefreshStatus(
+      projectInventory(nextInventory.catalog, configuredRuntimeModels, nextInventory.providers),
+    );
     setCatalogAuth(catalog, getPreparedModelFullCatalogAuth(nextInventory.catalog) ?? currentAuth);
     catalog.authoritative =
       acquiredNative && !catalog.refreshFailed ? catalog.authoritative : false;

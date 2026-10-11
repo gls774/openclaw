@@ -580,6 +580,7 @@ it("models.list full refresh discovers an enabled provider without configured cr
     },
   });
   const provider = "credential-free-fixture";
+  let modelId = "public-model";
   let requests = 0;
   const endpoint = createServer((_request, response) => {
     requests += 1;
@@ -587,7 +588,7 @@ it("models.list full refresh discovers an enabled provider without configured cr
     response.end(
       JSON.stringify([
         {
-          id: "public-model",
+          id: modelId,
           name: "Public model",
           reasoning: false,
           input: ["text"],
@@ -653,18 +654,34 @@ it("models.list full refresh discovers an enabled provider without configured cr
       await server.startupSettled;
       const list = (refresh = false) =>
         client.request<ModelsListResult>("models.list", { agentId: "main", view: "all", refresh });
-      expect((await list()).models.some((row) => row.id === "public-model")).toBe(false);
-      expect(requests).toBe(0);
+      // Runtime startup publishes before its background catalog acquisition completes.
+      const startup = await waitForCatalogPublication({
+        signal,
+        read: list,
+        ready: (result) =>
+          !result.pendingProviders?.includes(provider) &&
+          result.models.some((row) => row.provider === provider && row.id === "public-model"),
+      });
+      expect(startup.models).toContainEqual(modelRow(provider, "public-model"));
+      expect(requests).toBe(1);
+      const startupRequests = requests;
+      modelId = "refreshed-public-model";
       const refreshed = await waitForCatalogPublication({
         signal,
         start: () => list(true),
         read: list,
-        ready: (result) => !result.pendingProviders?.includes(provider),
+        ready: (result) =>
+          !result.pendingProviders?.includes(provider) &&
+          result.models.some(
+            (row) => row.provider === provider && row.id === "refreshed-public-model",
+          ),
       });
-      expect(refreshed.models).toContainEqual(modelRow(provider, "public-model"));
-      expect(requests).toBe(1);
-      expect((await list()).models).toContainEqual(modelRow(provider, "public-model"));
-      expect(requests).toBe(1);
+      expect(refreshed.models).toContainEqual(modelRow(provider, "refreshed-public-model"));
+      expect(refreshed.models).not.toContainEqual(modelRow(provider, "public-model"));
+      expect(requests - startupRequests).toBe(1);
+      const refreshedRequests = requests;
+      expect((await list()).models).toContainEqual(modelRow(provider, "refreshed-public-model"));
+      expect(requests).toBe(refreshedRequests);
     } finally {
       await disconnectGatewayClient(client);
       await server.close();

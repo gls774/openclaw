@@ -73,6 +73,7 @@ import {
 } from "../skills/runtime/refresh-state.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { withEnvAsync } from "../test-utils/env.js";
+import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { diffConfigPaths, diffGatewayReloadPaths } from "./config-diff.js";
 import {
   buildGatewayReloadPlan,
@@ -3267,22 +3268,20 @@ describe("startGatewayConfigReloader", () => {
 
   it.each([true])(
     "rejects changed durable install inputs despite a warmed caller cache (independent writer: %s)",
-    async (independentWriter) => {
-      const root = tempDirs.make("openclaw-reload-warm-ledger-");
-      const configPath = nodePath.join(root, "openclaw.json");
-      const config: OpenClawConfig = { plugins: { enabled: false } };
-      const snapshot = makeSnapshot({
-        config,
-        hash: "unchanged",
-      });
-      const before = { notes: { source: "npm" as const, spec: "notes@1" } };
-      const after = { notes: { source: "npm" as const, spec: "notes@2" } };
-      const started = createDeferred();
-      const finishRuntime = createDeferred();
-      const watcher = installWatcherMock();
-      await withEnvAsync(
-        { OPENCLAW_STATE_DIR: root, OPENCLAW_CONFIG_PATH: configPath },
-        async () => {
+    async (independentWriter) =>
+      withOpenClawTestState(
+        { label: "reload-warm-ledger", layout: "state-only" },
+        async ({ configPath }) => {
+          const config: OpenClawConfig = { plugins: { enabled: false } };
+          const snapshot = makeSnapshot({
+            config,
+            hash: "unchanged",
+          });
+          const before = { notes: { source: "npm" as const, spec: "notes@1" } };
+          const after = { notes: { source: "npm" as const, spec: "notes@2" } };
+          const started = createDeferred();
+          const finishRuntime = createDeferred();
+          const watcher = installWatcherMock();
           await seedInstalledPluginIndex(before, { config });
           await withPluginCache(createPluginCache(), async () => {
             expect(loadInstalledPluginIndexInstallRecordsSync()).toEqual(before);
@@ -3343,8 +3342,7 @@ describe("startGatewayConfigReloader", () => {
             }
           });
         },
-      );
-    },
+      ),
   );
 
   it.each(["matched", "source changed"] as const)(

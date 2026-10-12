@@ -120,10 +120,9 @@ operations and the embedded Control UI.
 Run `openclaw mcp-relay status` to see UI availability and any update guidance.
 Until the first launch, availability checks only whether the Gateway and relay
 support the tunnel. If Gateway authentication is unsupported, that first launch
-shows the configuration error inside the frame. Later launches use the built-in
-conversations view until a plugin restart or configuration reload clears the
-cached error. A Gateway or relay without tunnel support also keeps the built-in
-conversations view.
+shows the configuration error inside the frame. After correcting the configuration,
+open the UI again to retry. A Gateway or relay without tunnel support keeps the
+built-in conversations view.
 
 Revoke an app through **Connected apps** to close its embedded browser sessions,
 active requests, sockets, and MCP access. The embedded browser does not create
@@ -133,20 +132,9 @@ an ordinary device token that needs separate revocation.
 connection, but this is not end-to-end encryption against the relay. Only pair
 an app when you trust it and the relay with the access you select.
 
-The tunnel applies these limits per Gateway relay connection; stricter Gateway
-and endpoint limits still apply:
-
-| Resource                                            | Limit                              |
-| --------------------------------------------------- | ---------------------------------- |
-| Concurrent HTTP requests                            | 64                                 |
-| UI WebSockets, including pending opens              | 8                                  |
-| HTTP request body                                   | 16 MiB                             |
-| Raw payload per tunnel chunk                        | 512 KiB, within a 1 MiB JSON frame |
-| Queued response data and partial WebSocket messages | 32 MiB combined                    |
-| HTTP response-head wait                             | 60 seconds                         |
-| WebSocket-open wait                                 | 10 seconds                         |
-
-Oversized or stalled work fails explicitly. Disconnecting the relay closes its
+The Gateway ingress and relay enforce request, socket, buffer, and timeout limits.
+The plugin splits payloads into chunks of at most 512 KiB to fit the 1 MiB relay
+frame limit. Oversized or stalled work fails explicitly. Disconnecting the relay closes its
 active requests and sockets. Sandbox-origin WebSocket opens are refused; the
 sandbox serves only its dedicated HTTP content.
 

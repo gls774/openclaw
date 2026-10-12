@@ -3,12 +3,13 @@ import { Socket } from "node:net";
 import type { GatewayRequestHandlerOptions } from "openclaw/plugin-sdk/gateway-runtime";
 import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin from "../index.js";
 import { consentAuthority, relayCaller } from "./caller.js";
 import { registerMcpRelayConnectRoute, registerMcpRelayGatewayMethods } from "./gateway-methods.js";
+import { createTransportFixture } from "./relay.test-helpers.js";
 import type { RelayGrantAuthority } from "./state.js";
-import { createTransportFixture } from "./transport.test-helpers.js";
 
 type Caller = NonNullable<GatewayRequestHandlerOptions["client"]>;
 type Method = Parameters<OpenClawPluginApi["registerGatewayMethod"]>[1];
@@ -118,36 +119,49 @@ function denied(code: string) {
 }
 
 describe("MCP relay Gateway consent and grant ownership", () => {
-  it("binds approval to the verified browser caller without requiring a delegated role actor", async () => {
+  it("binds approval to the authenticated caller and stores it before notifying the relay", async () => {
     const h = await harness();
-    const approve = vi
-      .spyOn(h.service.consent, "approve")
-      .mockResolvedValue({ continueUrl: `${RELAY}/oauth/continue?request=${REQUEST_ID}` });
-    expect(await h.request("authorize.approve", { requestId: REQUEST_ID })).toEqual([
-      true,
-      { continueUrl: `${RELAY}/oauth/continue?request=${REQUEST_ID}` },
-    ]);
-    expect(approve).toHaveBeenCalledWith(
-      REQUEST_ID,
-      {
-        principal: { kind: "person", profileId: "person-alice" },
+    await h.ready();
+    const approving = h.request("authorize.approve", { requestId: REQUEST_ID });
+    const description = await h.socket.nextFrame();
+    expect(description).toMatchObject({
+      op: "authorize.describe",
+      params: { requestId: REQUEST_ID },
+    });
+    h.socket.acknowledge(description, {
+      kind: "oauth",
+      clientName: "Synthetic client",
+      redirectHost: "chatgpt.com",
+      expiresAt: 601_000,
+      profileId: "relay-selected-profile",
+    });
+    const approval = await h.socket.nextFrame();
+    expect(approval).toMatchObject({
+      op: "authorize.approve",
+      params: {
+        requestId: REQUEST_ID,
+        principal: "person",
         principalLabel: "Synthetic person",
         ceiling: ["operator.read", "operator.write"],
       },
-      expect.any(Function),
-    );
-    expect(h.registerGatewayMethod).toHaveBeenCalledWith(
-      "mcp-relay.authorize.approve",
-      expect.any(Function),
-      { scope: "operator.write" },
-    );
+    });
+    if (!isRecord(approval.params) || typeof approval.params.grantId !== "string") {
+      throw new Error("Missing grant");
+    }
+    expect(h.state.getGrant(approval.params.grantId)).toMatchObject({
+      principal: { kind: "person", profileId: "person-alice" },
+      ceiling: ["operator.read", "operator.write"],
+    });
+    expect(JSON.stringify(h.socket.frames)).not.toContain("profileId");
+    h.socket.acknowledge(approval);
+    expect(await approving).toEqual([
+      true,
+      { continueUrl: `${RELAY}/oauth/continue?request=${REQUEST_ID}` },
+    ]);
   });
 
-  it("rejects caller-selected identities and scopes outside the admitted ceiling", async () => {
+  it("rejects caller-selected identities and ceilings outside the admitted role", async () => {
     const h = await harness();
-    const approve = vi.spyOn(h.service.consent, "approve").mockResolvedValue({
-      continueUrl: `${RELAY}/oauth/continue?request=${REQUEST_ID}`,
-    });
     for (const params of [
       { profileId: "person-bob" },
       { principal: { kind: "person", profileId: "person-bob" } },
@@ -158,17 +172,78 @@ describe("MCP relay Gateway consent and grant ownership", () => {
         denied("invalid_params"),
       );
     }
-    expect(approve).not.toHaveBeenCalled();
-    await h.request(
-      "authorize.approve",
-      { requestId: REQUEST_ID, ceiling: ["operator.admin"] },
-      caller(["operator.admin"], "person-alice"),
-    );
-    expect(approve).toHaveBeenCalledWith(
-      REQUEST_ID,
-      expect.objectContaining({ ceiling: ["operator.admin"] }),
-      expect.any(Function),
-    );
+    expect(h.socket.frames).toEqual([]);
+  });
+
+  it("denies a connection request without creating a grant", async () => {
+    const h = await harness();
+    await h.ready();
+    const denying = h.request("authorize.deny", { requestId: REQUEST_ID });
+    h.socket.acknowledge(await h.socket.nextFrame(), {
+      kind: "link",
+      clientName: "Synthetic client",
+      redirectHost: "chatgpt.com",
+      expiresAt: 601_000,
+    });
+    const denial = await h.socket.nextFrame();
+    expect(denial).toMatchObject({ op: "authorize.deny", params: { requestId: REQUEST_ID } });
+    h.socket.acknowledge(denial);
+    expect(await denying).toEqual([
+      true,
+      { continueUrl: `${RELAY}/oauth/continue?request=${REQUEST_ID}` },
+    ]);
+    expect(await h.state.grants()).toEqual([]);
+  });
+
+  it.each(["expired", "foreign", "missing kind"])(
+    "refuses %s consent without recording a grant",
+    async (reason) => {
+      const h = await harness();
+      await h.ready();
+      const approving = h.request("authorize.approve", { requestId: REQUEST_ID });
+      const description = await h.socket.nextFrame();
+      if (reason === "foreign") {
+        h.socket.receive({
+          type: "res",
+          id: description.id,
+          ok: false,
+          error: { code: "not_found", message: "Foreign request" },
+        });
+      } else {
+        h.socket.acknowledge(description, {
+          kind: reason === "missing kind" ? undefined : "oauth",
+          clientName: "Synthetic client",
+          redirectHost: "chatgpt.com",
+          expiresAt: reason === "expired" ? 1_000 : 601_000,
+        });
+      }
+      expect(await approving).toEqual(denied("not_found"));
+      expect(await h.state.grants()).toEqual([]);
+    },
+  );
+
+  it("deletes a recorded grant if the relay rejects consent", async () => {
+    const h = await harness();
+    await h.ready();
+    const approving = h.request("authorize.approve", { requestId: REQUEST_ID });
+    h.socket.acknowledge(await h.socket.nextFrame(), {
+      kind: "oauth",
+      clientName: "Synthetic client",
+      redirectHost: "chatgpt.com",
+      expiresAt: 601_000,
+    });
+    const approval = await h.socket.nextFrame();
+    h.socket.receive({
+      type: "res",
+      id: approval.id,
+      ok: false,
+      error: { code: "not_found", message: "Expired" },
+    });
+    const revocation = await h.socket.nextFrame();
+    expect(revocation).toMatchObject({ op: "grant.revoke" });
+    expect(await h.state.grants()).toEqual([]);
+    h.socket.acknowledge(revocation);
+    expect(await approving).toEqual(denied("not_found"));
   });
 
   it.each([
@@ -226,7 +301,7 @@ describe("MCP relay Gateway consent and grant ownership", () => {
     expect(await h.request("grants", {}, admin)).toMatchObject([
       true,
       {
-        grants: [{ grantId: "gr_alice" }, { grantId: "gr_bob" }, { grantId: "gr_owner" }],
+        grants: [{ grantId: "gr_bob" }, { grantId: "gr_owner" }],
       },
     ]);
     expect(await h.request("revoke", { grantId: "gr_bob" }, admin)).toMatchObject([

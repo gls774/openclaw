@@ -5,19 +5,10 @@ import {
   type ControlUiView,
 } from "openclaw/plugin-sdk/control-ui";
 import type { RelayCaller } from "./caller.js";
+import type { RelayGrant } from "./state.js";
 import "./control-ui.css";
 
-type Grant = {
-  grantId: string;
-  clientName?: string;
-  createdAt?: number;
-  revokedAt?: number;
-  lastUsedAt?: number;
-  principal?: RelayCaller["principal"];
-  principalLabel?: string;
-  ceiling?: string[];
-};
-type Grants = { grants: Grant[]; caller: RelayCaller; relayUrl: string };
+type Grants = { grants: RelayGrant[]; caller: RelayCaller; relayUrl: string };
 type Consent = {
   kind: "oauth" | "link";
   clientName: string;
@@ -87,12 +78,6 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
     node.disabled = busy || !canUse();
     node.addEventListener("click", action);
     return node;
-  }
-
-  function field(label: string, value: string) {
-    const row = element("div");
-    row.append(element("dt", label), element("dd", value));
-    return row;
   }
 
   function accessPicker(
@@ -186,14 +171,14 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
     });
   }
 
-  function showPairing(returnFocusTarget: HTMLElement) {
+  function showPairing(returnFocusTarget: HTMLElement, pairingCaller: RelayCaller) {
     let pairingFull = false;
     const content = element("div", undefined, "mcp-connected-apps mcp-connected-apps__dialog");
     let pairing: Pairing | undefined;
     let pairingBusy = false;
     let pairingError = "";
     const createPairing = async () => {
-      if (pairingBusy || !snapshot?.caller.canPair || !canUse()) {
+      if (pairingBusy || !pairingCaller.canPair || !canUse()) {
         return;
       }
       const id = generation;
@@ -201,29 +186,24 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
       pairingError = "";
       draw();
       try {
-        const result = await host.request<Pairing>("mcp-relay.pair", {
+        pairing = await host.request<Pairing>("mcp-relay.pair", {
           ceiling: chosenCeiling(pairingFull),
         });
-        if (!current(id) || !dialog) {
-          return;
-        }
-        pairing = result;
       } catch (cause) {
-        if (!current(id) || !dialog) {
-          return;
-        }
         pairingError = host.redact(
           cause instanceof Error ? cause.message : "Pairing failed. Try again.",
         );
       }
-      pairingBusy = false;
-      draw();
+      if (current(id) && dialog) {
+        pairingBusy = false;
+        draw();
+      }
     };
     const draw = () => {
       content.replaceChildren();
       content.append(
         element("h2", "Pair with code"),
-        element("p", `Connect an app as ${snapshot?.caller.principalLabel ?? "you"}.`),
+        element("p", `Connect an app as ${pairingCaller.principalLabel}.`),
       );
       if (pairing) {
         content.append(element("p", "Enter this single-use code on the app’s connection page."));
@@ -270,7 +250,7 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
     draw();
     dialog = host.components.mountDialog(overlay, {
       label: "Pair with code",
-      description: `Connect an app as ${snapshot?.caller.principalLabel ?? "you"}.`,
+      description: `Connect an app as ${pairingCaller.principalLabel}.`,
       content,
       returnFocusTarget,
       onCancel: () => {
@@ -316,18 +296,11 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
   }
 
   function render() {
-    page.replaceChildren();
-    const heading = element("header", undefined, "mcp-connected-apps__header");
-    const introduction = element("div");
-    introduction.append(
-      element("h1", "Connected apps"),
-      element("p", "Manage apps connected to your Gateway through the MCP relay."),
-    );
-    heading.append(
-      introduction,
-      button("Refresh", () => void refresh()),
-    );
-    page.append(heading);
+    page.innerHTML = `
+      <header class="mcp-connected-apps__header">
+        <div><h1>Connected apps</h1><p>Manage apps connected to your Gateway through the MCP relay.</p></div>
+      </header>`;
+    page.querySelector("header")!.append(button("Refresh", () => void refresh()));
     if (!canUse()) {
       page.append(
         element(
@@ -354,34 +327,27 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
     if (!snapshot) {
       return;
     }
+    const connectedCaller = snapshot.caller;
     if (requestId && consent) {
       const panel = element("section", undefined, "mcp-connected-apps__consent");
-      panel.append(
-        element(
-          "span",
-          consent.kind === "link" ? "CONNECT ANOTHER GATEWAY" : "CONNECTION REQUEST",
-          "mcp-connected-apps__eyebrow",
-        ),
-      );
-      panel.append(element("h2", `Connect ${consent.clientName}?`));
-      const details = element("dl", undefined, "mcp-connected-apps__details");
-      details.append(
-        field("Approving as", consent.caller.principalLabel),
-        field("Returns to", consent.redirectHost),
-        field("Request expires", dates.format(consent.expiresAt)),
-      );
-      panel.append(
-        details,
+      panel.innerHTML = `
+        <span class="mcp-connected-apps__eyebrow"></span><h2></h2>
+        <dl class="mcp-connected-apps__details">
+          <div><dt>Approving as</dt><dd data-principal></dd></div>
+          <div><dt>Returns to</dt><dd data-redirect></dd></div>
+          <div><dt>Request expires</dt><dd data-expires></dd></div>
+        </dl>
+        <p class="mcp-connected-apps__hint">The app can act only within the access you allow and your current Gateway permissions. The relay can see content in transit.</p>`;
+      panel.querySelector("span")!.textContent =
+        consent.kind === "link" ? "CONNECT ANOTHER GATEWAY" : "CONNECTION REQUEST";
+      panel.querySelector("h2")!.textContent = `Connect ${consent.clientName}?`;
+      panel.querySelector("[data-principal]")!.textContent = consent.caller.principalLabel;
+      panel.querySelector("[data-redirect]")!.textContent = consent.redirectHost;
+      panel.querySelector("[data-expires]")!.textContent = dates.format(consent.expiresAt);
+      panel.querySelector("p")!.before(
         accessPicker(fullAccess, (full) => {
           fullAccess = full;
         }),
-      );
-      panel.append(
-        element(
-          "p",
-          "The app can act only within the access you allow and your current Gateway permissions. The relay can see content in transit.",
-          "mcp-connected-apps__hint",
-        ),
       );
       const actions = element("div", undefined, "mcp-connected-apps__actions");
       const allow = button("Allow", () => decide(true), true);
@@ -402,67 +368,44 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
       }
       page.append(panel);
     }
-    const toolbar = element("div", undefined, "mcp-connected-apps__toolbar");
-    toolbar.append(
-      element(
-        "p",
-        snapshot.caller.canAdmin
-          ? "All connected apps"
-          : `Apps connected as ${snapshot.caller.principalLabel}`,
-      ),
+    page.insertAdjacentHTML(
+      "beforeend",
+      `
+      <div class="mcp-connected-apps__toolbar"><p></p></div>
+      <div class="mcp-connected-apps__list"></div>
+      <p class="mcp-connected-apps__hint">Revoking an app ends its MCP access and embedded browser sessions. Reconnect the app to grant access again.</p>`,
     );
-    if (snapshot.caller.canPair) {
-      const pair = button("Pair with code", () => showPairing(pair), true);
+    const toolbar = page.querySelector(".mcp-connected-apps__toolbar")!;
+    toolbar.querySelector("p")!.textContent = connectedCaller.canAdmin
+      ? "All connected apps"
+      : `Apps connected as ${connectedCaller.principalLabel}`;
+    if (connectedCaller.canPair) {
+      const pair = button("Pair with code", () => showPairing(pair, connectedCaller), true);
       toolbar.append(pair);
     }
-    page.append(toolbar);
-    const list = element("div", undefined, "mcp-connected-apps__list");
+    const list = page.querySelector(".mcp-connected-apps__list")!;
     if (!snapshot.grants.length) {
-      list.append(
-        element("h2", "No connected apps yet"),
-        element("p", "Sign in with your Gateway from an app, or pair with a single-use code."),
-      );
+      list.innerHTML = `<h2>No connected apps yet</h2><p>Sign in with your Gateway from an app, or pair with a single-use code.</p>`;
     }
     for (const grant of snapshot.grants) {
       const row = element("article", undefined, "mcp-connected-apps__grant");
-      const body = element("div");
-      body.append(element("h2", grant.clientName ?? "Revoked app"));
+      row.innerHTML = `<div><h2></h2><p class="mcp-connected-apps__hint"></p><small></small></div>`;
+      row.querySelector("h2")!.textContent = grant.clientName;
       const own =
-        grant.principal?.kind === snapshot.caller.principal.kind &&
-        (grant.principal?.kind === "owner" ||
-          (snapshot.caller.principal.kind === "person" &&
-            grant.principal?.profileId === snapshot.caller.principal.profileId));
+        grant.principal.kind === connectedCaller.principal.kind &&
+        (grant.principal.kind === "owner" ||
+          (connectedCaller.principal.kind === "person" &&
+            grant.principal.profileId === connectedCaller.principal.profileId));
       const principalLabel =
-        grant.principal?.kind === "owner"
+        grant.principal.kind === "owner"
           ? "Gateway owner"
-          : (grant.principalLabel ??
-            (own
-              ? snapshot.caller.principalLabel
-              : grant.principal
-                ? "Another person"
-                : "Unknown principal"));
-      body.append(
-        element(
-          "p",
-          grant.ceiling
-            ? `${principalLabel} · ${accessLabel(grant.ceiling)}`
-            : "Revoked grant; app details unavailable",
-          "mcp-connected-apps__hint",
-        ),
-      );
-      const activity =
-        grant.revokedAt !== undefined
-          ? `Revoked ${dates.format(grant.revokedAt)}`
-          : grant.lastUsedAt !== undefined
-            ? `Last used ${dates.format(grant.lastUsedAt)}`
-            : grant.createdAt !== undefined
-              ? `Connected ${dates.format(grant.createdAt)} · Not used yet`
-              : "Revoked";
-      body.append(element("small", activity));
-      row.append(body);
-      if (grant.revokedAt !== undefined) {
-        row.append(element("span", "Revoked", "mcp-connected-apps__badge"));
-      } else if ((own || snapshot.caller.canAdmin) && host.connection.canWrite) {
+          : (grant.principalLabel ?? (own ? connectedCaller.principalLabel : "Another person"));
+      row.querySelector("p")!.textContent = `${principalLabel} · ${accessLabel(grant.ceiling)}`;
+      row.querySelector("small")!.textContent =
+        grant.lastUsedAt !== undefined
+          ? `Last used ${dates.format(grant.lastUsedAt)}`
+          : `Connected ${dates.format(grant.createdAt)} · Not used yet`;
+      if ((own || connectedCaller.canAdmin) && host.connection.canWrite) {
         row.append(
           button("Revoke", () => {
             void run(async (id) => {
@@ -470,7 +413,7 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
               const result = await host.request<Grants>("mcp-relay.grants", {});
               if (current(id)) {
                 snapshot = result;
-                notice = `${grant.clientName ?? "App"} revoked. Its MCP and embedded UI access has ended.`;
+                notice = `${grant.clientName} revoked. Its MCP and embedded UI access has ended.`;
               }
             });
           }),
@@ -478,14 +421,6 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
       }
       list.append(row);
     }
-    page.append(list);
-    page.append(
-      element(
-        "p",
-        "Revoking an app ends its MCP access and embedded browser sessions. Reconnect the app to grant access again.",
-        "mcp-connected-apps__hint",
-      ),
-    );
   }
 
   function sync() {

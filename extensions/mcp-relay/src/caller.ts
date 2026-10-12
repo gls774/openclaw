@@ -54,7 +54,6 @@ export function relayCaller(
 
 export function ownsGrant(caller: RelayCaller, grant: RelayGrant): boolean {
   return (
-    "principal" in grant &&
     grant.principal.kind === caller.principal.kind &&
     (grant.principal.kind === "owner" ||
       (caller.principal.kind === "person" &&

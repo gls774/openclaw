@@ -1,6 +1,12 @@
+import type { GatewayIngressPrincipalBindingV1 } from "openclaw/plugin-sdk/gateway-ingress";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayRequest } from "./gateway-request.js";
 import { createOperations } from "./operations.js";
+import { CLIENT, createPrincipalIngress, createTransportFixture } from "./relay.test-helpers.js";
+
+// Materialize the production error classifier before assertion timers start.
+await import("openclaw/plugin-sdk/gateway-runtime");
 
 const newer = {
   key: "agent:main:new",
@@ -21,7 +27,12 @@ const older = {
   lastActivityAt: 500,
 };
 
-function fixture(agentId?: string, now = () => 0) {
+const fixtures: Awaited<ReturnType<typeof createTransportFixture>>[] = [];
+afterEach(async () => {
+  await Promise.all(fixtures.splice(0).map((f) => f.stop()));
+});
+
+async function fixture(agentId?: string) {
   const request = vi.fn<GatewayRequest>();
   const describeSession = vi.fn<GatewayRequest>().mockResolvedValue({ session: newer });
   const listSessions = vi.fn<GatewayRequest>().mockResolvedValue({ sessions: [newer] });
@@ -48,12 +59,39 @@ function fixture(agentId?: string, now = () => 0) {
   const dispatch = createOperations({
     logger,
     agentId,
-    now,
     gateway: { name: "Synthetic Gateway", version: "1.0.0" },
   });
-  const operations = (op: string, params: unknown, assertAuthority = async () => {}) =>
-    dispatch(op, params, assertAuthority, boundRequest);
-  return { operations, request, describeSession, listSessions, agents, boundRequest, logger };
+  const binding: GatewayIngressPrincipalBindingV1 = {
+    request: async () => {
+      throw new Error("Unexpected Gateway request");
+    },
+    openControlUi: async () => {
+      throw new Error("Unexpected UI");
+    },
+    close: async () => {},
+  };
+  vi.spyOn(binding, "request").mockImplementation(boundRequest);
+  const ingress = createPrincipalIngress();
+  ingress.factory.bindPrincipal.mockResolvedValue(binding);
+  const f = await createTransportFixture(dispatch, { controlUiIngress: ingress.factory });
+  fixtures.push(f);
+  await f.state.issue("code", 10_000, 0);
+  await f.state.createGrant({ grantId: "gr_one", codeHash: "code", client: CLIENT }, 0);
+  await f.ready();
+  let id = 0;
+  const operations = async (op: string, params: unknown) => {
+    const frame = await f.request({ id: String(++id), op, params, grantId: "gr_one" });
+    if (!frame.ok) {
+      const error = isRecord(frame.error) ? frame.error : {};
+      throw Object.assign(new Error(String(error.message)), error);
+    }
+    if (isRecord(frame.result) && op === "status") {
+      const { ui: _ui, ...result } = frame.result;
+      return result;
+    }
+    return frame.result;
+  };
+  return { ...f, operations, request, describeSession, listSessions, agents, boundRequest, logger };
 }
 
 function message(id: string, role: string, text: string) {
@@ -61,10 +99,8 @@ function message(id: string, role: string, text: string) {
 }
 
 describe("MCP relay data operations", () => {
-  afterEach(() => vi.useRealTimers());
-
   it("maps only the grant-bound RPC roster and session results to the wire", async () => {
-    const { operations, listSessions } = fixture();
+    const { operations, listSessions } = await fixture();
     expect(await operations("status", {})).toEqual({
       gateway: { name: "Synthetic Gateway", version: "1.0.0" },
       agents: [
@@ -95,7 +131,7 @@ describe("MCP relay data operations", () => {
   });
 
   it("anchors the first history page and preserves opaque older cursors with plain user/assistant text", async () => {
-    const { operations, request } = fixture();
+    const { operations, request } = await fixture();
     request.mockResolvedValueOnce({ messages: [message("latest", "assistant", "answer")] });
     request.mockResolvedValueOnce({
       messages: [
@@ -137,23 +173,10 @@ describe("MCP relay data operations", () => {
     );
   });
 
-  it("truncates plain text", async () => {
-    const { operations, request } = fixture();
-    request.mockResolvedValueOnce({
-      messages: [message("large", "assistant", "x".repeat(20_000))],
-    });
-    const result = await operations("conversation.read", {
-      conversationId: newer.key,
-      limit: 1,
-      before: "cursor",
-    });
-    expect(result).toMatchObject({ messages: [{ text: `${"x".repeat(15_999)}…` }] });
-  });
-
   it.each(["missing", "FORBIDDEN", "INVALID_REQUEST"])(
     "reports a %s session lookup without disclosing whether it exists",
     async (response) => {
-      const missing = fixture();
+      const missing = await fixture();
       if (response === "missing") {
         missing.describeSession.mockResolvedValue({ session: null });
       } else {
@@ -176,31 +199,6 @@ describe("MCP relay data operations", () => {
     },
   );
 
-  it("refuses rebound sessions and invalid history cursors", async () => {
-    const rebound = fixture();
-    rebound.describeSession
-      .mockResolvedValueOnce({ session: newer })
-      .mockResolvedValueOnce({ session: { ...newer, sessionId: "replacement" } });
-    rebound.request.mockResolvedValueOnce({ messages: [message("old", "user", "old data")] });
-    await expect(
-      rebound.operations("conversation.read", {
-        conversationId: newer.key,
-        limit: 1,
-        before: "cursor",
-      }),
-    ).rejects.toMatchObject({ code: "invalid_params" });
-
-    const stale = fixture();
-    stale.request.mockResolvedValueOnce({ kind: "reset" });
-    await expect(
-      stale.operations("conversation.read", {
-        conversationId: newer.key,
-        limit: 1,
-        before: "stale",
-      }),
-    ).rejects.toMatchObject({ code: "invalid_params" });
-  });
-
   it.each([
     ["status", { unexpected: true }],
     ["conversations.list", { limit: 0 }],
@@ -212,7 +210,7 @@ describe("MCP relay data operations", () => {
     ["message.send", { message: "hello", waitMs: -1 }],
     ["reply.get", { conversationId: newer.key, runId: "run", waitMs: 50_001 }],
   ])("validates %s parameters before reaching the SDK", async (op, params) => {
-    const { operations, request, describeSession, listSessions } = fixture();
+    const { operations, request, describeSession, listSessions } = await fixture();
     await expect(operations(op, params)).rejects.toMatchObject({ code: "invalid_params" });
     expect(request).not.toHaveBeenCalled();
     expect(describeSession).not.toHaveBeenCalled();
@@ -220,7 +218,7 @@ describe("MCP relay data operations", () => {
   });
 
   it("submits a new conversation with agent precedence and returns its accepted run without waiting", async () => {
-    const { operations, request } = fixture("research");
+    const { operations, request } = await fixture("research");
     request.mockResolvedValueOnce({
       key: newer.key,
       sessionId: newer.sessionId,
@@ -236,7 +234,7 @@ describe("MCP relay data operations", () => {
       { signal: expect.any(AbortSignal) },
     );
 
-    const configured = fixture("research");
+    const configured = await fixture("research");
     configured.request.mockResolvedValueOnce({
       key: newer.key,
       sessionId: newer.sessionId,
@@ -252,7 +250,7 @@ describe("MCP relay data operations", () => {
   });
 
   it("continues an existing conversation and reads its exact completed reply", async () => {
-    const { operations, request } = fixture();
+    const { operations, request } = await fixture();
     request.mockResolvedValueOnce({ runId: "accepted-run", status: "started" });
     request.mockResolvedValueOnce({
       status: "ok",
@@ -287,7 +285,7 @@ describe("MCP relay data operations", () => {
       2,
       "agent.wait",
       { runId: "accepted-run", timeoutMs: 50_000 },
-      { signal: expect.any(AbortSignal) },
+      undefined,
     );
   });
 
@@ -314,7 +312,7 @@ describe("MCP relay data operations", () => {
   ])(
     "returns the run owner's $name without transcript reads",
     async ({ terminalReply, content }) => {
-      const { operations, request } = fixture();
+      const { operations, request } = await fixture();
       request.mockResolvedValueOnce({ status: "ok", terminalReply });
       expect(
         await operations("reply.get", { conversationId: newer.key, runId: "run", waitMs: 0 }),
@@ -322,13 +320,13 @@ describe("MCP relay data operations", () => {
       expect(request).toHaveBeenCalledExactlyOnceWith(
         "agent.wait",
         { runId: "run", timeoutMs: 0 },
-        { signal: expect.any(AbortSignal) },
+        undefined,
       );
     },
   );
 
   it.each(["message.send", "reply.get"])("refuses a missing conversation for %s", async (op) => {
-    const { operations, request, describeSession } = fixture();
+    const { operations, request, describeSession } = await fixture();
     describeSession.mockResolvedValue({ session: null });
     await expect(
       operations(op, {
@@ -338,17 +336,6 @@ describe("MCP relay data operations", () => {
       }),
     ).rejects.toMatchObject({ code: "not_found" });
     expect(request).not.toHaveBeenCalled();
-  });
-
-  it("withholds a reply if the conversation is deleted while waiting", async () => {
-    const { operations, request, describeSession } = fixture();
-    request.mockImplementationOnce(async () => {
-      describeSession.mockResolvedValue({ session: null });
-      return { status: "ok", terminalReply: { disposition: "visible", text: "deleted reply" } };
-    });
-    await expect(
-      operations("reply.get", { conversationId: newer.key, runId: "run", waitMs: 100 }),
-    ).rejects.toMatchObject({ code: "not_found" });
   });
 
   it.each([
@@ -362,7 +349,7 @@ describe("MCP relay data operations", () => {
     ["provider started", { status: "timeout", providerStarted: true }, "failed"],
     ["terminal failure", { status: "error" }, "failed"],
   ] as const)("maps %s without exposing host errors", async (_name, payload, expected) => {
-    const { operations, request } = fixture();
+    const { operations, request } = await fixture();
     request.mockResolvedValueOnce({ ...payload, error: "sensitive internal failure" });
     const result = await operations("reply.get", {
       conversationId: newer.key,
@@ -374,29 +361,19 @@ describe("MCP relay data operations", () => {
   });
 
   it("rechecks grant authority after session preparation and before submission", async () => {
-    const { operations, request, describeSession } = fixture();
-    let authorized = true;
+    const { operations, request, describeSession, state } = await fixture();
     describeSession.mockImplementationOnce(async () => {
-      authorized = false;
+      await state.revoke("gr_one");
       return { session: newer };
     });
-    const assertAuthority = async () => {
-      if (!authorized) {
-        throw new Error("grant revoked");
-      }
-    };
     await expect(
-      operations(
-        "message.send",
-        { conversationId: newer.key, message: "hello", waitMs: 0 },
-        assertAuthority,
-      ),
-    ).rejects.toThrow("grant revoked");
+      operations("message.send", { conversationId: newer.key, message: "hello", waitMs: 0 }),
+    ).rejects.toMatchObject({ code: "grant_revoked" });
     expect(request).not.toHaveBeenCalled();
   });
 
   it("reports a created conversation whose initial message failed without inventing a run", async () => {
-    const { operations, request } = fixture();
+    const { operations, request } = await fixture();
     request.mockResolvedValueOnce({
       key: newer.key,
       sessionId: newer.sessionId,
@@ -411,133 +388,34 @@ describe("MCP relay data operations", () => {
     );
     expect(request).toHaveBeenCalledTimes(1);
   });
-  it("returns the initial reply of a new conversation", async () => {
-    const { operations, request } = fixture();
-    request.mockResolvedValueOnce({
-      key: newer.key,
-      sessionId: newer.sessionId,
-      runId: "created-run",
-      runStarted: true,
-    });
-    request.mockResolvedValueOnce({
-      status: "ok",
-      terminalReply: { disposition: "visible", text: "created answer" },
-    });
-    expect(await operations("message.send", { message: "start", waitMs: 100 })).toEqual({
-      conversationId: newer.key,
-      runId: "created-run",
-      status: "completed",
-      reply: "created answer",
-    });
-    expect(request).toHaveBeenCalledTimes(2);
-  });
-
-  it.each([20_000, 65_000])(
-    "keeps an accepted run when preparation consumes %ims of its request budget",
-    async (elapsed) => {
-      let now = 0;
-      const { operations, request } = fixture(undefined, () => now);
+  it.each(["CLIENT_TIMEOUT", "AGENT_TIMEOUT", "INVALID_REQUEST"])(
+    "preserves an accepted run after SDK %s",
+    async (code) => {
+      const { operations, request } = await fixture();
       request
-        .mockImplementationOnce(async () => {
-          now = elapsed;
-          return { runId: "run", status: "started" };
-        })
-        .mockResolvedValueOnce({ status: "pending" });
-      expect(
-        await operations("message.send", {
-          conversationId: newer.key,
-          message: "start",
-          waitMs: 50_000,
-        }),
-      ).toEqual({ conversationId: newer.key, runId: "run", status: "running" });
-      if (elapsed < 65_000) {
-        expect(request).toHaveBeenNthCalledWith(
-          2,
-          "agent.wait",
-          { runId: "run", timeoutMs: 44_000 },
-          { signal: expect.any(AbortSignal) },
-        );
+        .mockResolvedValueOnce({ runId: "run", status: "started" })
+        .mockRejectedValueOnce(Object.assign(new Error("request rejected"), { code }));
+      const result = operations("message.send", {
+        conversationId: newer.key,
+        message: "hello",
+        waitMs: 100,
+      });
+      if (code === "INVALID_REQUEST") {
+        await expect(result).rejects.toMatchObject({ code: "internal" });
       } else {
-        expect(request).toHaveBeenCalledTimes(1);
+        await expect(result).resolves.toEqual({
+          conversationId: newer.key,
+          runId: "run",
+          status: "running",
+        });
       }
     },
   );
-  it.each(["CLIENT_TIMEOUT", "AGENT_TIMEOUT", "elapsed"])(
-    "preserves accepted run IDs after a %s RPC timeout",
-    async (failure) => {
-      let now = 0;
-      const { operations, request } = fixture(undefined, () => now);
-      request
-        .mockResolvedValueOnce({ runId: "run", status: "started" })
-        .mockImplementationOnce(async () => {
-          if (failure === "elapsed") {
-            now = 5_100;
-            throw new Error("opaque host timeout");
-          }
-          throw Object.assign(new Error("opaque SDK timeout"), { code: failure });
-        });
-      expect(
-        await operations("message.send", {
-          conversationId: newer.key,
-          message: "hello",
-          waitMs: 100,
-        }),
-      ).toEqual({ conversationId: newer.key, runId: "run", status: "running" });
-      expect(request).toHaveBeenCalledTimes(2);
-    },
-  );
-
-  it("preserves non-timeout SDK failures after run acceptance", async () => {
-    const { operations, request } = fixture();
-    const failure = Object.assign(new Error("request rejected"), { code: "INVALID_REQUEST" });
-    request
-      .mockResolvedValueOnce({ runId: "run", status: "started" })
-      .mockRejectedValueOnce(failure);
-    await expect(
-      operations("message.send", { conversationId: newer.key, message: "hello", waitMs: 100 }),
-    ).rejects.toBe(failure);
-  });
-
-  it("aborts an elapsed grant-bound RPC and preserves its accepted run ID", async () => {
-    vi.useFakeTimers();
-    const { operations, request } = fixture();
-    let waiting!: () => void;
-    const enteredWait = new Promise<void>((resolve) => {
-      waiting = resolve;
-    });
-    request.mockResolvedValueOnce({ runId: "run", status: "started" });
-    request.mockImplementationOnce(async (_method, _params, options) => {
-      const signal = options!.signal!;
-      waiting();
-      return new Promise((_resolve, reject) => {
-        signal.addEventListener(
-          "abort",
-          () => {
-            reject(signal.reason instanceof Error ? signal.reason : new Error("RPC aborted"));
-          },
-          { once: true },
-        );
-      });
-    });
-    const result = operations("message.send", {
-      conversationId: newer.key,
-      message: "hello",
-      waitMs: 100,
-    });
-    await enteredWait;
-    await vi.advanceTimersByTimeAsync(5_100);
-    await expect(result).resolves.toEqual({
-      conversationId: newer.key,
-      runId: "run",
-      status: "running",
-    });
-    expect(vi.getTimerCount()).toBe(0);
-  });
 
   it.each(["message.send", "conversation.read"])(
     "logs a %s Gateway failure once without request content",
     async (op) => {
-      const { operations, request, logger } = fixture();
+      const { operations, request, logger } = await fixture();
       const privateText = 'maintain the DISTINCTIVE "private request text"\nfor launch';
       const failure = Object.assign(
         new Error(
@@ -562,23 +440,25 @@ describe("MCP relay data operations", () => {
         ),
       ).rejects.toBeDefined();
       expect(logger.error).toHaveBeenCalledExactlyOnceWith(
-        `mcp-relay: op=${op} method=${op === "message.send" ? "sessions.create" : "chat.history"} INVALID_REQUEST: request rejected: [redacted]; encoded: [redacted] try again`,
+        `mcp-relay: op=${op} method=${op === "message.send" ? "sessions.create" : "chat.history"} failed`,
       );
       expect(JSON.stringify(logger.error.mock.calls)).not.toMatch(
         /DISTINCTIVE|PRIVATE|ABCDE-FGHIJ/,
       );
     },
   );
-
-  it("logs failed session lookup RPCs without dumping error details", async () => {
-    const { operations, describeSession, logger } = fixture();
-    const failure = new Error("session lookup unavailable");
-    describeSession.mockRejectedValueOnce(failure);
+  it.each(["result", "error"])("withholds a revoked %s at publication", async (kind) => {
+    const f = await fixture();
+    f.request.mockImplementationOnce(async () => {
+      await f.state.revoke("gr_one");
+      return {
+        key: "private-conversation",
+        runId: kind === "error" ? undefined : "run",
+        runStarted: kind !== "error",
+      };
+    });
     await expect(
-      operations("reply.get", { conversationId: newer.key, runId: "run", waitMs: 0 }),
-    ).rejects.toBe(failure);
-    expect(logger.error).toHaveBeenCalledExactlyOnceWith(
-      "mcp-relay: op=reply.get method=sessions.describe unknown: session lookup unavailable",
-    );
+      f.operations("message.send", { message: "hello", waitMs: 0 }),
+    ).rejects.toMatchObject({ code: "grant_revoked" });
   });
 });

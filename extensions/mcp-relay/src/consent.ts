@@ -106,7 +106,7 @@ export class RelayConsent {
       }
     };
     assertApprovalCurrent();
-    const created = await this.#options.state.approveGrant(
+    await this.#options.state.approveGrant(
       {
         grantId,
         clientId: requestId,
@@ -116,12 +116,6 @@ export class RelayConsent {
       },
       assertApprovalCurrent,
     );
-    if (!created) {
-      throw new RelayError(
-        "unavailable",
-        "Could not record this connection. Start connecting again.",
-      );
-    }
     try {
       assertApprovalCurrent();
       await this.#options.request("authorize.approve", {

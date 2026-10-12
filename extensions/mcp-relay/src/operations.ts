@@ -1,20 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { redactSensitiveText } from "openclaw/plugin-sdk/logging-core";
 import type { PluginLogger } from "openclaw/plugin-sdk/plugin-entry";
 import { isRecord, readStringValue } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { escapeRegExp } from "openclaw/plugin-sdk/text-utility-runtime";
-import {
-  createDeadlineGatewayRequest,
-  type DeadlineGatewayRequest,
-  type GatewayRequest,
-} from "./gateway-request.js";
+import type { GatewayRequest } from "./gateway-request.js";
 import { RelayError, truncateText } from "./protocol.js";
 
 type Session = {
   key: string;
   agentId: string;
   sessionId?: string;
-  lifecycleRevision?: string;
   label?: string;
   derivedTitle?: string;
   lastMessagePreview?: string;
@@ -86,7 +79,6 @@ function sessionRow(value: unknown): Session {
     key: value.key,
     agentId: value.agentId,
     sessionId: readStringValue(value.sessionId),
-    lifecycleRevision: readStringValue(value.lifecycleRevision),
     label: readStringValue(value.label),
     derivedTitle: readStringValue(value.derivedTitle),
     lastMessagePreview: readStringValue(value.lastMessagePreview),
@@ -99,8 +91,8 @@ function sessionRow(value: unknown): Session {
   };
 }
 
-async function listAgents(request: DeadlineGatewayRequest) {
-  const result = await request("agents.list", {}, { timeoutMs: 15_000 });
+async function listAgents(request: GatewayRequest) {
+  const result = await request("agents.list", {});
   if (!isRecord(result) || !Array.isArray(result.agents)) {
     throw new RelayError("unavailable", "Agent status is unavailable. Retry in OpenClaw.");
   }
@@ -197,24 +189,18 @@ export function createOperations({
   logger,
   gateway,
   agentId: configuredAgentId,
-  now = Date.now,
 }: {
   logger: Pick<PluginLogger, "error">;
   gateway: { name: string; version: string };
   agentId?: string;
-  now?: () => number;
 }) {
-  async function findSession(
-    conversationId: string,
-    request: DeadlineGatewayRequest,
-  ): Promise<Session> {
+  async function findSession(conversationId: string, request: GatewayRequest): Promise<Session> {
     let result: unknown;
     try {
-      result = await request(
-        "sessions.describe",
-        { key: conversationId, includeDerivedTitles: true },
-        { timeoutMs: 15_000 },
-      );
+      result = await request("sessions.describe", {
+        key: conversationId,
+        includeDerivedTitles: true,
+      });
     } catch (error) {
       const { isGatewayClientRequestError } = await import("openclaw/plugin-sdk/gateway-runtime");
       if (
@@ -236,22 +222,18 @@ export function createOperations({
 
   async function readHistory(
     session: Session,
-    params: Record<string, unknown>,
-    request: DeadlineGatewayRequest,
+    params: { limit: number; cursor?: string; messageId?: string },
+    request: GatewayRequest,
   ) {
     try {
       return historyPage(
-        await request(
-          "chat.history",
-          {
-            sessionKey: session.key,
-            agentId: session.agentId,
-            maxChars: 16_000,
-            maxBytes: 400_000,
-            ...params,
-          },
-          { timeoutMs: 15_000 },
-        ),
+        await request("chat.history", {
+          sessionKey: session.key,
+          agentId: session.agentId,
+          maxChars: 16_000,
+          maxBytes: 400_000,
+          ...params,
+        }),
       );
     } catch (error) {
       if (error instanceof RelayError) {
@@ -273,7 +255,7 @@ export function createOperations({
     conversationId: string,
     runId: string,
     waitMs: number,
-    request: DeadlineGatewayRequest,
+    request: GatewayRequest,
     justSubmitted = false,
   ) {
     const base = { conversationId, runId };
@@ -281,12 +263,7 @@ export function createOperations({
       if (waitMs === 0 && justSubmitted) {
         return { ...base, status: "running" };
       }
-      const result = await request(
-        "agent.wait",
-        { runId, timeoutMs: waitMs },
-        { timeoutMs: waitMs + 5_000 },
-      );
-      await findSession(conversationId, request);
+      const result = await request("agent.wait", { runId, timeoutMs: waitMs });
       if (!isRecord(result)) {
         throw new RelayError(
           "unavailable",
@@ -334,18 +311,14 @@ export function createOperations({
             : {}),
       };
     } catch (error) {
-      if (error instanceof RelayError && error.code === "timeout") {
+      if (isRecord(error) && (error.code === "CLIENT_TIMEOUT" || error.code === "AGENT_TIMEOUT")) {
         return { ...base, status: "running" };
       }
       throw error;
     }
   }
 
-  async function execute(
-    op: string,
-    params: unknown,
-    request: DeadlineGatewayRequest,
-  ): Promise<unknown> {
+  async function execute(op: string, params: unknown, request: GatewayRequest): Promise<unknown> {
     switch (op) {
       case "status": {
         paramsObject(params, []);
@@ -364,21 +337,17 @@ export function createOperations({
         const limit = integerParam(input, "limit", 1, 50);
         const search = stringParam(input, "search", 200);
         const agentId = stringParam(input, "agentId", 128);
-        const result = await request(
-          "sessions.list",
-          {
-            limit,
-            ...(search ? { search } : {}),
-            ...(agentId ? { agentId } : {}),
-            includeGlobal: false,
-            includeUnknown: false,
-            includeDerivedTitles: true,
-            includeLastMessage: true,
-            archived: "all",
-            sortBy: "activity",
-          },
-          { timeoutMs: 15_000 },
-        );
+        const result = await request("sessions.list", {
+          limit,
+          ...(search ? { search } : {}),
+          ...(agentId ? { agentId } : {}),
+          includeGlobal: false,
+          includeUnknown: false,
+          includeDerivedTitles: true,
+          includeLastMessage: true,
+          archived: "all",
+          sortBy: "activity",
+        });
         if (!isRecord(result) || !Array.isArray(result.sessions)) {
           throw new RelayError(
             "unavailable",
@@ -422,16 +391,9 @@ export function createOperations({
           // Anchor once so subsequent pages use the host's source-bound opaque cursor.
           page = anchor ? await readHistory(session, { messageId: anchor, limit }, request) : tail;
         }
-        const current = await findSession(conversationId, request);
-        if (
-          current.sessionId !== session.sessionId ||
-          current.lifecycleRevision !== session.lifecycleRevision
-        ) {
-          invalid("The conversation changed. Read it again without before.");
-        }
         return {
           conversationId,
-          title: title(current),
+          title: title(session),
           messages: page.messages.flatMap((value) => {
             const message = conversationMessage(value);
             return message ? [message] : [];
@@ -453,17 +415,13 @@ export function createOperations({
           if (requestedAgentId && requestedAgentId !== session.agentId) {
             invalid("agentId does not own this conversation. Select the conversation's agent.");
           }
-          accepted = await request(
-            "chat.send",
-            {
-              sessionKey: session.key,
-              sessionId: session.sessionId,
-              agentId: session.agentId,
-              message,
-              idempotencyKey: randomUUID(),
-            },
-            { timeoutMs: 15_000 },
-          );
+          accepted = await request("chat.send", {
+            sessionKey: session.key,
+            sessionId: session.sessionId,
+            agentId: session.agentId,
+            message,
+            idempotencyKey: randomUUID(),
+          });
         } else {
           const roster = await listAgents(request);
           const agentId = requestedAgentId ?? configuredAgentId ?? roster.defaultId;
@@ -477,7 +435,7 @@ export function createOperations({
               "The selected agent does not exist. Get the Gateway status and choose an available agent.",
             );
           }
-          accepted = await request("sessions.create", { agentId, message }, { timeoutMs: 15_000 });
+          accepted = await request("sessions.create", { agentId, message });
           if (!isRecord(accepted) || typeof accepted.key !== "string") {
             throw new RelayError(
               "unavailable",
@@ -525,67 +483,27 @@ export function createOperations({
   return async (
     op: string,
     params: unknown,
-    assertAuthority: () => Promise<void>,
+    assertAuthority: () => void,
     boundRequest: GatewayRequest,
   ): Promise<unknown> => {
-    const waitMs =
-      isRecord(params) &&
-      typeof params.waitMs === "number" &&
-      Number.isInteger(params.waitMs) &&
-      params.waitMs >= 0 &&
-      params.waitMs <= 50_000
-        ? params.waitMs
-        : 0;
-    const deadline = now() + waitMs + 15_000;
-    let gatewayMethod = "none";
-    let logged = false;
-    const logFailure = (error: unknown) => {
-      if (logged) {
-        return;
-      }
-      logged = true;
-      const code = isRecord(error) && typeof error.code === "string" ? error.code : "unknown";
-      const message = error instanceof Error ? error.message : "Unexpected failure";
-      let diagnostic = `${code}: ${message}`;
-      // Error messages may echo input; never log request values or error details/stacks.
-      const values = (isRecord(params) ? Object.values(params) : [])
-        .flatMap((value) =>
-          typeof value === "string" && value ? [value, JSON.stringify(value).slice(1, -1)] : [],
-        )
-        .toSorted((left, right) => right.length - left.length);
-      if (values.length) {
-        diagnostic = diagnostic.replace(
-          new RegExp(values.map(escapeRegExp).join("|"), "g"),
-          "[redacted]",
-        );
-      }
-      diagnostic = redactSensitiveText(diagnostic, { mode: "tools" })
-        .replace(/[\r\n\u2028\u2029]/g, " ")
-        .slice(0, 1000);
-      logger.error(`mcp-relay: op=${op} method=${gatewayMethod} ${diagnostic}`);
-    };
-    // The service owns admission/publication; host calls are the effect boundary.
-    const request = createDeadlineGatewayRequest(
-      async (method, requestParams, options) => {
-        gatewayMethod = method;
-        try {
-          await assertAuthority();
-          return await boundRequest(method, requestParams, options);
-        } catch (error) {
-          logFailure(error);
-          throw error;
+    // The SDK binding has no deadline; agent.wait owns its observation timeout.
+    const request: GatewayRequest = async (method, requestParams) => {
+      assertAuthority();
+      const signal = method === "agent.wait" ? undefined : AbortSignal.timeout(15_000);
+      try {
+        return await boundRequest(method, requestParams, signal ? { signal } : undefined);
+      } catch (error) {
+        // Host errors can echo request content; log only the failed operation.
+        logger.error(`mcp-relay: op=${op} method=${method} failed`);
+        if (signal?.aborted) {
+          throw new RelayError(
+            "timeout",
+            "This request reached its time limit. Check the conversation in OpenClaw before retrying.",
+          );
         }
-      },
-      deadline,
-      now,
-    );
-    try {
-      return await execute(op, params, request);
-    } catch (error) {
-      if (!(error instanceof RelayError) || error.code === "internal") {
-        logFailure(error);
+        throw error;
       }
-      throw error;
-    }
+    };
+    return await execute(op, params, request);
   };
 }

@@ -23,11 +23,10 @@ import {
   readGrantCreation,
 } from "./protocol.js";
 import type { RelayState, RelayGrantAuthority } from "./state.js";
-import { UI_BUFFER_BYTES, readUiFrameAncestors } from "./ui-tunnel-protocol.js";
+import { readUiFrameAncestors } from "./ui-tunnel-protocol.js";
 import { UiTunnel } from "./ui-tunnel.js";
 
 export type RelaySocket = {
-  readonly bufferedAmount?: number;
   on(event: "message", listener: (data: RawData, binary: boolean) => void): void;
   on(event: "close", listener: (code: number, reason: Buffer) => void): void;
   on(event: "error", listener: (error: Error) => void): void;
@@ -44,18 +43,7 @@ type Pending = {
 };
 type ServiceOptions = {
   scheduler: PluginServiceSchedulerV1;
-  state: Pick<
-    RelayState,
-    | "issue"
-    | "createGrant"
-    | "authorize"
-    | "revoke"
-    | "recordRevocation"
-    | "grants"
-    | "assertGrantCurrent"
-    | "getGrant"
-    | "approveGrant"
-  >;
+  state: RelayState;
   identity: Identity;
   relayUrl: string;
   gateway: { name: string; version: string };
@@ -64,7 +52,7 @@ type ServiceOptions = {
   operations: (
     op: string,
     params: unknown,
-    assertAuthority: () => Promise<void>,
+    assertAuthority: () => void,
     request: GatewayRequest,
   ) => Promise<unknown>;
   socketFactory?: (url: string) => RelaySocket;
@@ -79,12 +67,9 @@ export class RelayService {
   #socket?: RelaySocket;
   #connection?: PluginServiceSchedulerV1;
   #ready = false;
-  #stopped = false;
   #attempt = 0;
-  #sequence = 0;
   #ui?: UiTunnel;
   #bindings?: GrantBindings;
-  readonly #closingUi = new Set<Promise<void>>();
 
   constructor(options: ServiceOptions) {
     this.#options = options;
@@ -106,34 +91,23 @@ export class RelayService {
   }
 
   async stop(): Promise<void> {
-    this.#stopped = true;
     this.#ready = false;
     this.#rejectPending();
-    this.#closeUi();
+    const closing = this.#closeUi();
     this.#options.scheduler.beginClose();
     this.#socket?.terminate();
     this.#socket = undefined;
-    await Promise.allSettled(this.#closingUi);
+    await closing;
     await this.#options.scheduler.stop();
-  }
-
-  #assertCurrent(): void {
-    if (this.#stopped || this.#options.scheduler.signal.aborted) {
-      throw new RelayError(
-        "unavailable",
-        "MCP relay is stopped. Enable the plugin and start the Gateway.",
-      );
-    }
   }
 
   async status() {
     const grants = await this.#options.state.grants();
-    this.#assertCurrent();
     return {
       connected: this.#ready,
       gatewayId: this.#options.identity.gatewayId,
       relayUrl: this.#options.relayUrl,
-      grantsCount: grants.filter((grant) => grant.revokedAt === undefined).length,
+      grantsCount: grants.length,
       ui: this.#uiStatus(),
     };
   }
@@ -150,19 +124,16 @@ export class RelayService {
     return { available: true, basePath: path ? `/${path}` : "/" };
   }
 
-  #closeUi(): void {
+  async #closeUi(): Promise<void> {
     const bindings = this.#bindings;
     const ui = this.#ui;
     this.#bindings = undefined;
     this.#ui = undefined;
-    const closing = Promise.all([bindings?.close(), ui?.close()]).then(() => undefined);
-    this.#closingUi.add(closing);
-    void closing.finally(() => this.#closingUi.delete(closing)).catch(() => undefined);
+    await Promise.allSettled([bindings?.close(), ui?.close()]);
   }
 
   async grants(caller?: RelayCaller) {
     const grants = await this.#options.state.grants();
-    this.#assertCurrent();
     return {
       grants:
         caller && !caller.canAdmin ? grants.filter((grant) => ownsGrant(caller, grant)) : grants,
@@ -179,9 +150,8 @@ export class RelayService {
     };
     await this.consent.validateAuthority(
       selected,
-      assertCommandCurrent ?? (() => this.#assertCurrent()),
+      assertCommandCurrent ?? (() => this.#options.scheduler.signal.throwIfAborted()),
     );
-    const socket = this.#socket;
     const code = createPairingCode();
     const expiresAt = this.#options.scheduler.now() + 10 * 60_000;
     const hash = codeHash(code);
@@ -190,45 +160,32 @@ export class RelayService {
       expiresAt,
       this.#options.scheduler.now(),
       assertCommandCurrent,
-      authority,
+      selected,
     );
     assertCommandCurrent?.();
     this.#requireReady();
-    if (socket !== this.#socket) {
-      throw new RelayError(
-        "unavailable",
-        "The relay reconnected. Run openclaw mcp-relay pair again.",
-      );
-    }
     await this.#request("pair.offer", {
       codeHash: hash,
       expiresAt,
-      principal: authority?.principal.kind ?? "owner",
-      ...(authority?.principalLabel ? { principalLabel: authority.principalLabel } : {}),
-      ceiling: authority?.ceiling ?? ["operator.read", "operator.write"],
+      principal: selected.principal.kind,
+      ...(selected.principalLabel ? { principalLabel: selected.principalLabel } : {}),
+      ceiling: selected.ceiling,
     });
+    assertCommandCurrent?.();
     this.#requireReady();
     return { code, expiresAt, mcpUrl: new URL("/mcp", this.#options.relayUrl).href };
   }
 
   async revoke(grantId: string, assertCommandCurrent?: () => void) {
     assertCommandCurrent?.();
-    this.#assertCurrent();
-    if (
-      !(await this.#options.state.revoke(
-        grantId,
-        this.#options.scheduler.now(),
-        assertCommandCurrent,
-      ))
-    ) {
+    if (!(await this.#options.state.revoke(grantId, assertCommandCurrent))) {
       throw new RelayError(
         "not_found",
         "Grant not found. Run openclaw mcp-relay grants and use a listed grant ID.",
       );
     }
     this.#ui?.revoke(grantId);
-    this.#bindings?.revoke(grantId);
-    this.#assertCurrent();
+    await this.#bindings?.revoke(grantId);
     if (!this.#ready) {
       return { revoked: true, relayNotified: false };
     }
@@ -236,13 +193,12 @@ export class RelayService {
       await this.#request("grant.revoke", { grantId });
       return { revoked: true, relayNotified: true };
     } catch {
-      // Local revocation is authoritative; reconnect replays durable tombstones.
+      // A missing local grant remains refused even if the relay is offline.
       return { revoked: true, relayNotified: false };
     }
   }
 
   #requireReady(): void {
-    this.#assertCurrent();
     if (!this.#ready || !this.#socket) {
       throw new RelayError(
         "unavailable",
@@ -252,7 +208,6 @@ export class RelayService {
   }
 
   #connect(): void {
-    this.#assertCurrent();
     const { relayUrl, identity, scheduler, socketFactory } = this.#options;
     const url = new URL("/v1/gateway/connect", relayUrl);
     url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
@@ -267,11 +222,10 @@ export class RelayService {
           new WebSocket(address, {
             maxPayload: MAX_FRAME_BYTES,
             followRedirects: false,
-            handshakeTimeout: 10_000,
           }))
       )(url.href);
     } catch {
-      this.#retireConnection(connection);
+      void connection.stop();
       this.#retry(0);
       return;
     }
@@ -279,14 +233,9 @@ export class RelayService {
     const bindings = new GrantBindings(this.#ingress, this.#options.state, connection.signal);
     this.#bindings = bindings;
     let helloSent = false;
-    let activeRequests = 0;
     const current = () =>
-      !this.#stopped &&
-      !scheduler.signal.aborted &&
-      !connection.signal.aborted &&
-      this.#socket === socket;
+      !scheduler.signal.aborted && !connection.signal.aborted && this.#socket === socket;
     const assertConnectionCurrent = () => {
-      this.#assertCurrent();
       if (!current()) {
         throw new RelayError(
           "unavailable",
@@ -327,9 +276,10 @@ export class RelayService {
       this.#ready = false;
       this.#socket = undefined;
       this.#rejectPending();
-      this.#closeUi();
-      this.#retireConnection(connection);
-      if (!this.#stopped && !scheduler.signal.aborted) {
+      void this.#closeUi();
+      void connection.stop();
+      this.#connection = undefined;
+      if (!scheduler.signal.aborted) {
         this.#retry(code);
       }
     });
@@ -342,10 +292,6 @@ export class RelayService {
         : Buffer.isBuffer(data)
           ? data
           : Buffer.from(data);
-      if (bytes.byteLength > MAX_FRAME_BYTES) {
-        socket.close(1009, "Frame too large");
-        return;
-      }
       if (binary) {
         socket.close(4400, "Text frames required");
         return;
@@ -389,15 +335,8 @@ export class RelayService {
           }
           if (frameAncestors) {
             this.#ui = new UiTunnel({
-              open: async (grantId, presentation) => {
-                const binding = await bindings.get(grantId);
-                try {
-                  return await binding.openControlUi(presentation);
-                } catch (error) {
-                  bindings.retireOnFailure(grantId, error);
-                  throw error;
-                }
-              },
+              open: async (grantId, presentation) =>
+                (await bindings.get(grantId)).openControlUi(presentation),
               frameAncestors,
               scheduler: connection,
               assertGrantCurrent: (grantId) => {
@@ -408,7 +347,6 @@ export class RelayService {
                 assertConnectionCurrent();
                 this.#send(socket, outgoing);
               },
-              bufferedBytes: () => socket.bufferedAmount ?? 0,
               closeRelay: () => socket.terminate(),
             });
           }
@@ -422,23 +360,6 @@ export class RelayService {
             run: () => {
               if (current()) {
                 this.#send(socket, { type: "ping" });
-              }
-            },
-          });
-          connection.schedule({
-            id: "revocations",
-            delayMs: 0,
-            run: async () => {
-              const grants = await this.#options.state.grants();
-              for (const grant of grants) {
-                if (!current()) {
-                  return;
-                }
-                if (grant.revokedAt !== undefined) {
-                  await this.#request("grant.revoke", { grantId: grant.grantId }).catch(
-                    () => undefined,
-                  );
-                }
               }
             },
           });
@@ -491,71 +412,37 @@ export class RelayService {
         return;
       }
       const id = frame.id;
-      if (activeRequests >= 32) {
-        this.#send(socket, {
-          type: "res",
-          id,
-          ok: false,
-          error: { code: "unavailable", message: "OpenClaw is busy. Try again shortly." },
-        });
-        return;
-      }
       const grantId =
         frame.op !== "grant.create" &&
         frame.op !== "grant.revoked" &&
         typeof frame.grantId === "string"
           ? frame.grantId
           : undefined;
-      const assertPublicationCurrent = () => {
-        if (grantId !== undefined) {
-          this.#options.state.assertGrantCurrent(grantId);
+      void (async () => {
+        let response:
+          | { ok: true; result: unknown }
+          | { ok: false; error: ReturnType<typeof safeError> };
+        try {
+          response = {
+            ok: true,
+            result: capResult(await this.#handle(frame, assertConnectionCurrent, bindings)),
+          };
+        } catch (error) {
+          response = { ok: false, error: safeError(error) };
         }
-      };
-      activeRequests++;
-      connection.schedule({
-        id: `request:${++this.#sequence}`,
-        delayMs: 0,
-        run: async () => {
-          try {
-            if (!current()) {
-              return;
-            }
-            const result = capResult(await this.#handle(frame, assertConnectionCurrent, bindings));
-            if (current()) {
-              assertPublicationCurrent();
-              this.#send(socket, { type: "res", id, ok: true, result });
-            }
-          } catch (error) {
-            if (current()) {
-              let failure = error;
-              try {
-                assertPublicationCurrent();
-              } catch (revoked) {
-                failure = revoked;
-              }
-              this.#send(socket, { type: "res", id, ok: false, error: safeError(failure) });
-            }
-          } finally {
-            activeRequests--;
+        if (!current()) {
+          return;
+        }
+        try {
+          if (grantId !== undefined) {
+            this.#options.state.assertGrantCurrent(grantId);
           }
-        },
-      });
+        } catch (error) {
+          response = { ok: false, error: safeError(error) };
+        }
+        this.#send(socket, { type: "res", id, ...response });
+      })().catch(() => socket.terminate());
     });
-  }
-
-  #retireConnection(connection: PluginServiceSchedulerV1): void {
-    connection.beginClose();
-    if (this.#connection === connection) {
-      this.#connection = undefined;
-    }
-    if (!this.#options.scheduler.signal.aborted) {
-      // A connection callback cannot join its own scope; its parent owns the join.
-      this.#options.scheduler.schedule({
-        id: `retire:${++this.#sequence}`,
-        delayMs: 0,
-        run: () => connection.stop(),
-      });
-    }
   }
 
   #retry(closeCode: number): void {
@@ -570,16 +457,6 @@ export class RelayService {
 
   #send(socket: RelaySocket, frame: unknown): void {
     const text = JSON.stringify(frame);
-    const bytes = Buffer.byteLength(text);
-    if (bytes > MAX_FRAME_BYTES) {
-      socket.close(1009, "Frame too large");
-      return;
-    }
-    if ((socket.bufferedAmount ?? 0) + (this.#ui?.bufferedBytes ?? 0) + bytes > UI_BUFFER_BYTES) {
-      socket.close(1011, "Relay output buffer limit exceeded");
-      socket.terminate();
-      return;
-    }
     socket.send(text);
   }
 
@@ -588,9 +465,6 @@ export class RelayService {
     const socket = this.#socket;
     if (!socket || !this.#connection) {
       throw new RelayError("unavailable", "Reconnect the MCP relay and try again.");
-    }
-    if (this.#pending.size >= 32) {
-      throw new RelayError("unavailable", "The relay is busy. Try again shortly.");
     }
     const id = randomUUID();
     const connection = this.#connection;
@@ -644,14 +518,8 @@ export class RelayService {
     }
     if (op !== "grant.create" && op !== "grant.revoked") {
       const { grantId } = frame;
-      if (typeof grantId !== "string") {
-        throw new RelayError(
-          "grant_revoked",
-          "This connection was revoked. Run openclaw mcp-relay pair and connect again.",
-        );
-      }
       assertConnectionCurrent();
-      if (!(await state.authorize(grantId, scheduler.now()))) {
+      if (typeof grantId !== "string" || !(await state.authorize(grantId, scheduler.now()))) {
         throw new RelayError(
           "grant_revoked",
           "This connection was revoked. Run openclaw mcp-relay pair and connect again.",
@@ -661,21 +529,12 @@ export class RelayService {
         assertConnectionCurrent();
         state.assertGrantCurrent(grantId);
       };
-      assertAuthority();
       const binding = await bindings.get(grantId);
-      const request: GatewayRequest = async (...args) => {
-        try {
-          return await binding.request(...args);
-        } catch (error) {
-          bindings.retireOnFailure(grantId, error);
-          throw error;
-        }
-      };
       const result = await this.#options.operations(
         op,
         params,
-        async () => assertAuthority(),
-        request,
+        assertAuthority,
+        binding.request.bind(binding),
       );
       return op === "status" && isRecord(result) ? { ...result, ui: this.#uiStatus() } : result;
     }
@@ -694,9 +553,9 @@ export class RelayService {
       ) {
         throw new RelayError("invalid_params", "Supply a valid revocation reason.");
       }
-      await state.recordRevocation(params.grantId, scheduler.now());
+      await state.revoke(params.grantId);
       this.#ui?.revoke(params.grantId);
-      this.#bindings?.revoke(params.grantId);
+      await bindings.revoke(params.grantId);
       return {};
     }
     if (

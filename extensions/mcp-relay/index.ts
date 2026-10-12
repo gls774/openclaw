@@ -49,11 +49,8 @@ export default definePluginEntry({
         const { createOperations } = await import("./src/operations.js");
         const config = parseMcpRelayConfig(api.pluginConfig);
         const scheduler = context.scheduler;
-        const state = new RelayState(
-          api.runtime,
-          config.relayUrl,
-          () => scheduler.signal.throwIfAborted(),
-          scheduler.now,
+        const state = new RelayState(api.runtime, config.relayUrl, () =>
+          scheduler.signal.throwIfAborted(),
         );
         const identity = identityFromPrivateKey((await state.initialize()).privateKey);
         scheduler.signal.throwIfAborted();
@@ -70,7 +67,6 @@ export default definePluginEntry({
             logger: api.logger,
             gateway,
             agentId: config.agentId,
-            now: scheduler.now,
           }),
         });
         service.start();

@@ -76,16 +76,13 @@ Status reports UI availability from the optional host factory and the relay's
 path, defaulting to `/`, without opening a handle. Authentication is checked on
 the first real open. An `unsupported-auth` result becomes an `unavailable` error
 with the core's configuration guidance for that grant. A rejected owner grant
-does not disable other person grants on the same Gateway. Role changes retire
-an existing binding; the next request can reopen it under current authority and
-its original ceiling.
+does not disable other person grants on the same Gateway. Core checks each
+request against current authority and the grant's original ceiling. Rejected
+opens are retried on the next request.
 
 Tunnel frames retain the 1 MiB frame ceiling, with at most 512 KiB of raw payload
-per chunk. Per relay connection, the plugin limits work to 64 HTTP streams and
-eight WebSockets, including pending opens, with 16 MiB request bodies and 32 MiB
-of combined queued response data and partial WebSocket messages. HTTP heads have
-a 60-second deadline and WebSocket opens a 10-second deadline. Core and endpoint
-limits can be stricter. HTTP cancellation, socket closure, disconnect, and stop
+per chunk. Core ingress and the relay own concurrency, byte, and timeout limits.
+HTTP cancellation, socket closure, disconnect, and stop
 settle the corresponding streams and sockets. Only core-issued
 `pluginReadCookies` are forwarded as cookies; arbitrary `Set-Cookie` headers and
 relay session cookies are excluded.
@@ -115,22 +112,12 @@ pairing-code and owner grant lifetimes remain unchanged.
 
 ### State and update behavior
 
-The existing plugin-state SQLite table holds one no-eviction authority record.
-This makes pairing-code consumption and grant insertion one compare-and-apply
-transaction without a new schema or cross-key transaction API. Identity is
-created once with compare-and-apply, bound to its relay origin, and never
-regenerated after corruption or an I/O failure. There are no JSON sidecars.
-
-The authority record holds at most 100 live pairing codes and 1,000 grant IDs,
-including permanent revocation tombstones, within a 512 KiB admission budget.
-Admission reserves room for later timestamps, so reaching capacity cannot block
-revocation. Expired codes are pruned when another code is issued; consumed live
-codes remain unavailable. Capacity exhaustion refuses new pairing rather than
-evicting authority. Pending operator revocations remain effective offline and
-are replayed on reconnect. Failed/uncertain storage writes are not blindly retried.
-Relay revocations for unknown IDs persist an ID/timestamp tombstone too, so an
-in-flight grant creation cannot activate that ID afterward. These tombstones
-appear in the CLI grant list without invented client metadata.
+The plugin-state SQLite keyed store holds the relay-bound identity, expiring
+pairing codes, and active grants. Consuming a code deletes it; revoking a grant
+deletes it. Unknown and revoked grants are refused identically, including while
+the relay is offline. A crash between consuming a code and saving its grant
+requires a new pairing code. There are no CAS retries, recovery records, or JSON
+sidecars. Corrupt identities are refused rather than regenerated.
 
 Disablement closes the service and its sockets; re-enablement keeps the same
 identity and grants. No core schema changes are needed.

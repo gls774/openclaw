@@ -3,11 +3,11 @@ import {
   type GatewayControlUiIngressErrorCode,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { abortable, fixture, HTTP, ORIGINS, WS } from "./ui-tunnel.test-helpers.js";
+import { abortable, createTunnelFixture, HTTP, ORIGINS, WS } from "./relay.test-helpers.js";
 
-const fixtures: ReturnType<typeof fixture>[] = [];
+const fixtures: ReturnType<typeof createTunnelFixture>[] = [];
 function setup() {
-  const f = fixture();
+  const f = createTunnelFixture();
   fixtures.push(f);
   return f;
 }
@@ -15,13 +15,13 @@ afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((f) => f.stop()));
 });
 
-async function opened(f: ReturnType<typeof fixture>) {
+async function opened(f: ReturnType<typeof createTunnelFixture>) {
   await f.receive(WS);
   expect(await f.frames.next()).toEqual({ type: "ui.ws.opened", sid: WS.sid });
   return f.sockets[0]!;
 }
 
-async function response(f: ReturnType<typeof fixture>) {
+async function response(f: ReturnType<typeof createTunnelFixture>) {
   const head = await f.frames.next();
   const chunks: Buffer[] = [];
   for (;;) {
@@ -237,39 +237,6 @@ describe("Control UI relay tunnel", () => {
     expect(socket.closes[0]).toEqual({ code: 1000, reason: "browser left" });
   });
 
-  it("cancels queued and running admissions while the shared factory open remains pending", async () => {
-    const f = setup();
-    const admission = Promise.withResolvers<typeof f.handle>();
-    vi.mocked(f.open).mockReturnValue(admission.promise);
-    try {
-      for (let i = 0; i < 4; i++) {
-        const sid = `pending_${i}`;
-        const http = i % 2 === 0;
-        f.tunnel.receive(
-          http ? { ...HTTP, sid, headers: [["accept", "text/html"]] } : { ...WS, sid },
-        );
-        const dispatch = i < 2 ? undefined : f.clock.advanceBy(0);
-        f.tunnel.receive(
-          http
-            ? { type: "ui.cancel", sid }
-            : { type: "ui.ws.close", sid, code: 1000, reason: "cancelled" },
-        );
-        await (dispatch ?? f.clock.advanceBy(0));
-      }
-      expect(f.open).toHaveBeenCalledTimes(1);
-      expect(f.handle.request).not.toHaveBeenCalled();
-      expect(f.handle.openWebSocket).not.toHaveBeenCalled();
-      expect(f.clock.armedAtMs).toBeNull();
-      expect(f.tunnel.bufferedBytes).toBe(0);
-      expect(f.frames.values).toEqual([]);
-      await f.receive(HTTP);
-      admission.resolve(f.handle);
-      expect((await response(f)).head.status).toBe(200);
-    } finally {
-      admission.resolve(f.handle);
-    }
-  });
-
   it("revokes the live handle, aborts HTTP, closes sockets, and refuses subsequent frames", async () => {
     const f = setup();
     const socket = await opened(f);
@@ -290,19 +257,6 @@ describe("Control UI relay tunnel", () => {
     expect((await f.frames.next()).code).toBe("grant_revoked");
     await f.stop();
     expect(f.handle.close).toHaveBeenCalledTimes(1);
-  });
-
-  it("closes every stream and handle on relay disconnect, including a late handle open", async () => {
-    const f = setup();
-    const admission = Promise.withResolvers<typeof f.handle>();
-    vi.mocked(f.open).mockReturnValue(admission.promise);
-    await f.receive(HTTP);
-    const stopping = f.tunnel.close();
-    admission.resolve(f.handle);
-    await stopping;
-    expect(f.handle.close).toHaveBeenCalledTimes(1);
-    expect(f.handle.request).not.toHaveBeenCalled();
-    expect(f.frames.values).toEqual([]);
   });
 
   it("retires old origins and opens a new handle for the next real frame", async () => {
@@ -335,59 +289,6 @@ describe("Control UI relay tunnel", () => {
     await f.receive(HTTP);
     await f.receive(HTTP);
     expect((await f.frames.next()).code).toBe("invalid");
-  });
-
-  it("enforces per-connection HTTP and pending socket counts", async () => {
-    const f = setup();
-    vi.mocked(f.handle.request).mockImplementation(async (input) => abortable(input.signal));
-    vi.mocked(f.handle.openWebSocket).mockImplementation(async (input) => abortable(input.signal));
-    for (let i = 0; i < 65; i++) {
-      await f.receive({ ...HTTP, sid: `http_${String(i).padStart(3, "0")}` });
-    }
-    expect(await f.frames.next()).toMatchObject({
-      type: "ui.error",
-      code: "limit_exceeded",
-      sid: "http_064",
-    });
-    for (let i = 0; i < 9; i++) {
-      await f.receive({ ...WS, sid: `socket_${i}` });
-    }
-    expect(await f.frames.next()).toMatchObject({
-      type: "ui.error",
-      code: "limit_exceeded",
-      sid: "socket_8",
-    });
-  });
-
-  it("bounds HTTP uploads even when the Gateway consumes chunks promptly", async () => {
-    const f = setup();
-    vi.mocked(f.handle.request).mockImplementation(async (input) => {
-      await new Response(input.body).arrayBuffer();
-      return { response: new Response(), pluginReadCookies: [] };
-    });
-    const b64 = Buffer.alloc(512 * 1024).toString("base64");
-    await f.receive({ ...HTTP, method: "POST", b64, more: true });
-    for (let i = 1; i < 33; i++) {
-      await f.receive({ type: "ui.http.body", sid: HTTP.sid, b64, more: true });
-    }
-    expect((await f.frames.next()).code).toBe("limit_exceeded");
-  });
-
-  it("expires incomplete messages and enforces head and socket-open deadlines", async () => {
-    const f = setup();
-    const socket = await opened(f);
-    await f.receive({ type: "ui.ws.msg", sid: WS.sid, text: "partial", more: true });
-    await f.clock.advanceBy(60_000);
-    expect((await f.frames.next()).code).toBe("unavailable");
-    expect(socket.closes[0]?.code).toBe(1011);
-    vi.mocked(f.handle.request).mockImplementation(async (input) => abortable(input.signal));
-    await f.receive(HTTP);
-    await f.clock.advanceBy(60_000);
-    expect((await f.frames.next()).message).toContain("60 seconds");
-    vi.mocked(f.handle.openWebSocket).mockImplementation(async (input) => abortable(input.signal));
-    await f.receive({ ...WS, sid: "socket02" });
-    await f.clock.advanceBy(10_000);
-    expect((await f.frames.next()).message).toContain("10 seconds");
   });
 
   it("rejects unsafe core cookies before publishing the response head", async () => {

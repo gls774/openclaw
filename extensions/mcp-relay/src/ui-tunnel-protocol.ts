@@ -7,7 +7,6 @@ import { containsAsciiControlCharacter } from "openclaw/plugin-sdk/string-normal
 import { MAX_FRAME_BYTES, RelayError } from "./protocol.js";
 
 export const UI_CHUNK_BYTES = 512 * 1024;
-export const UI_BUFFER_BYTES = 32 * 1024 * 1024;
 export type UiErrorCode =
   | "grant_revoked"
   | "unavailable"

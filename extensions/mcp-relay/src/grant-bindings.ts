@@ -1,8 +1,7 @@
-import {
-  GatewayControlUiIngressError,
-  type GatewayControlUiIngressFactoryV1,
-  type GatewayControlUiIngressFactoryV2,
-  type GatewayIngressPrincipalBindingV1,
+import type {
+  GatewayControlUiIngressFactoryV1,
+  GatewayControlUiIngressFactoryV2,
+  GatewayIngressPrincipalBindingV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import { RelayError } from "./protocol.js";
 import type { RelayState } from "./state.js";
@@ -19,12 +18,9 @@ export function principalFactory(
   return factory;
 }
 
-type Binding = { abort: AbortController; pending: Promise<GatewayIngressPrincipalBindingV1> };
-
 /** The relay connection owns one principal resolution shared by each grant's UI and RPC. */
 export class GrantBindings {
-  readonly #bindings = new Map<string, Binding>();
-  readonly #closing = new Set<Promise<void>>();
+  readonly #bindings = new Map<string, Promise<GatewayIngressPrincipalBindingV1>>();
   constructor(
     readonly factory: GatewayControlUiIngressFactoryV2,
     readonly state: Pick<RelayState, "getGrant" | "assertGrantCurrent">,
@@ -33,17 +29,6 @@ export class GrantBindings {
 
   async get(grantId: string): Promise<GatewayIngressPrincipalBindingV1> {
     this.signal.throwIfAborted();
-    this.state.assertGrantCurrent(grantId);
-    const existing = this.#bindings.get(grantId);
-    if (existing) {
-      return existing.pending;
-    }
-    if (this.#bindings.size + this.#closing.size >= 32) {
-      throw new RelayError(
-        "unavailable",
-        "Too many active connected apps. Reconnect the relay and try again.",
-      );
-    }
     const grant = this.state.getGrant(grantId);
     if (!grant) {
       throw new RelayError(
@@ -51,52 +36,39 @@ export class GrantBindings {
         "This app was disconnected. Connect it again from Connected apps.",
       );
     }
-    const abort = new AbortController();
+    const existing = this.#bindings.get(grantId);
+    if (existing) {
+      return existing;
+    }
     const pending = this.factory.bindPrincipal({
       audienceId: grantId,
       principal: grant.principal,
       operatorScopeCeiling: grant.ceiling,
-      signal: AbortSignal.any([this.signal, abort.signal]),
+      signal: this.signal,
       assertCurrent: () => {
         this.signal.throwIfAborted();
-        abort.signal.throwIfAborted();
         this.state.assertGrantCurrent(grantId);
       },
     });
-    const binding = { abort, pending };
-    this.#bindings.set(grantId, binding);
-    void pending.catch(() => this.revoke(grantId));
+    this.#bindings.set(grantId, pending);
+    void pending.catch(() => {
+      if (this.#bindings.get(grantId) === pending) {
+        this.#bindings.delete(grantId);
+      }
+    });
     return pending;
   }
 
-  retireOnFailure(grantId: string, error: unknown): void {
-    if (
-      error instanceof GatewayControlUiIngressError &&
-      ["closed", "forbidden", "unsupported-auth"].includes(error.code)
-    ) {
-      this.revoke(grantId);
-    }
-  }
-
-  revoke(grantId: string): void {
-    const binding = this.#bindings.get(grantId);
-    if (!binding) {
-      return;
-    }
+  async revoke(grantId: string): Promise<void> {
+    const pending = this.#bindings.get(grantId);
     this.#bindings.delete(grantId);
-    binding.abort.abort();
-    const closing = binding.pending.then(
-      (handle) => handle.close(),
+    await pending?.then(
+      (binding) => binding.close(),
       () => undefined,
     );
-    this.#closing.add(closing);
-    void closing.finally(() => this.#closing.delete(closing)).catch(() => undefined);
   }
 
   async close(): Promise<void> {
-    for (const id of this.#bindings.keys()) {
-      this.revoke(id);
-    }
-    await Promise.all(this.#closing);
+    await Promise.all(Array.from(this.#bindings.keys(), (id) => this.revoke(id)));
   }
 }

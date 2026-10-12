@@ -171,7 +171,7 @@ describe("Connected apps native page", () => {
       .fn()
       .mockResolvedValueOnce(snapshot)
       .mockResolvedValueOnce({ revoked: true })
-      .mockResolvedValueOnce({ ...snapshot, grants: [{ ...grant, revokedAt: 1_800_000_000_001 }] });
+      .mockResolvedValueOnce({ ...snapshot, grants: [] });
     fixture(request);
     await rendered(() => document.body.textContent!.includes("Team app"));
     expect(document.body.textContent).toContain("Jordan Example");
@@ -180,9 +180,9 @@ describe("Connected apps native page", () => {
       document.body.textContent!.includes("Its MCP and embedded UI access has ended."),
     );
     expect(request).toHaveBeenCalledWith("mcp-relay.revoke", { grantId: "grant-other" });
-    expect(document.body.textContent).toContain("Revoked");
-    expect(
-      [...document.querySelectorAll("button")].some((node) => node.textContent === "Revoke"),
-    ).toBe(false);
+    expect(document.querySelector(".mcp-connected-apps__grant")).toBeNull();
+    expect(document.querySelector('[role="status"]')?.textContent).toBe(
+      "Team app revoked. Its MCP and embedded UI access has ended.",
+    );
   });
 });

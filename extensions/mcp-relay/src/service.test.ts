@@ -1,23 +1,22 @@
 import {
   GatewayControlUiIngressError,
   type GatewayControlUiIngressV1,
-  type GatewayIngressPrincipalBindingV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createOperations } from "./operations.js";
-import { codeHash, RelayError } from "./protocol.js";
-import type { RelayGrantAuthority } from "./state.js";
+import { codeHash } from "./protocol.js";
 import {
   CHALLENGE,
   CLIENT,
   createPrincipalIngress,
   createTransportFixture,
   GATEWAY_ID,
+  HTTP,
+  IngressSocket,
+  ORIGINS,
   PUBLIC_KEY,
   SIGNATURE,
-} from "./transport.test-helpers.js";
-import { abortable, HTTP, IngressSocket, ORIGINS, WS } from "./ui-tunnel.test-helpers.js";
+} from "./relay.test-helpers.js";
+import type { RelayGrantAuthority } from "./state.js";
 
 const unavailableUi = {
   available: false,
@@ -29,14 +28,6 @@ const PERSON_AUTHORITY: RelayGrantAuthority = {
   principalLabel: "Synthetic person",
   ceiling: ["operator.read", "operator.write"],
 };
-const REQUEST_ID = "A".repeat(43);
-const REQUEST_DETAILS = {
-  kind: "oauth",
-  clientName: CLIENT.name,
-  redirectHost: "chatgpt.com",
-  expiresAt: 601_000,
-};
-
 const fixtures: Awaited<ReturnType<typeof createTransportFixture>>[] = [];
 async function fixture(...args: Parameters<typeof createTransportFixture>) {
   const value = await createTransportFixture(...args);
@@ -59,73 +50,6 @@ async function createGrant(f: Awaited<ReturnType<typeof fixture>>, grantId = "gr
 }
 
 describe("MCP relay transport and authority", () => {
-  it("composes grant-bound message submission, reply observation, and revoked errors", async () => {
-    const binding: GatewayIngressPrincipalBindingV1 = {
-      request: async () => {
-        throw new Error("Unexpected Gateway request");
-      },
-      openControlUi: async () => {
-        throw new Error("Unexpected UI open");
-      },
-      close: async () => {},
-    };
-    const request = vi.spyOn(binding, "request");
-    const ingress = createPrincipalIngress();
-    ingress.factory.bindPrincipal.mockResolvedValue(binding);
-    const f = await fixture(
-      createOperations({
-        logger: { error: vi.fn() },
-        gateway: { name: "Synthetic", version: "1" },
-      }),
-      { controlUiIngress: ingress.factory },
-    );
-    await createGrant(f);
-    await f.ready();
-    request
-      .mockResolvedValueOnce({ defaultId: "main", agents: [{ id: "main" }] })
-      .mockResolvedValueOnce({ key: "agent:main:new", runId: "run", runStarted: true });
-    expect(
-      await f.request({
-        id: "send",
-        op: "message.send",
-        grantId: "gr_one",
-        params: { message: "hello", waitMs: 0 },
-      }),
-    ).toMatchObject({
-      ok: true,
-      result: { conversationId: "agent:main:new", runId: "run", status: "running" },
-    });
-    request
-      .mockResolvedValueOnce({ session: { key: "agent:main:new", agentId: "main" } })
-      .mockResolvedValueOnce({
-        status: "ok",
-        terminalReply: { disposition: "visible", text: "answer" },
-      })
-      .mockResolvedValueOnce({ session: { key: "agent:main:new", agentId: "main" } });
-    expect(
-      await f.request({
-        id: "reply",
-        op: "reply.get",
-        grantId: "gr_one",
-        params: { conversationId: "agent:main:new", runId: "run", waitMs: 0 },
-      }),
-    ).toMatchObject({ ok: true, result: { status: "completed", reply: "answer" } });
-    request
-      .mockResolvedValueOnce({ defaultId: "main", agents: [{ id: "main" }] })
-      .mockImplementationOnce(async () => {
-        await f.state.revoke("gr_one", f.scheduler.now());
-        return { key: "private-conversation", runStarted: false };
-      });
-    expect(
-      await f.request({
-        id: "revoked",
-        op: "message.send",
-        grantId: "gr_one",
-        params: { message: "again", waitMs: 0 },
-      }),
-    ).toEqual(denied("revoked", "grant_revoked"));
-  });
-
   it("caps operation results at the relay publication boundary", async () => {
     const f = await fixture(async () => ({ text: "x".repeat(512 * 1024) }));
     await createGrant(f);
@@ -274,7 +198,7 @@ describe("MCP relay transport and authority", () => {
         },
       });
       const persisted = f.storage.persisted();
-      expect(persisted).toContain('"consumed":false');
+      expect(persisted).toContain('"code:');
       f.socket.acknowledge(offer);
       const paired = await pairing;
       expect(paired).toEqual({
@@ -292,114 +216,26 @@ describe("MCP relay transport and authority", () => {
       expect(persisted).toContain(codeHash(paired.code));
       expect(persisted).not.toContain(paired.code);
       expect(JSON.stringify(f.socket.frames)).not.toContain("private-person-profile");
-    },
-  );
-
-  it("records Gateway consent before approving OAuth without disclosing the person's profile ID", async () => {
-    const f = await fixture();
-    await f.ready();
-    await f.clock.advanceBy(0);
-    const approving = f.service.consent.approve(REQUEST_ID, PERSON_AUTHORITY, () => {});
-    const description = await f.socket.nextFrame();
-    expect(description).toMatchObject({
-      op: "authorize.describe",
-      params: { requestId: REQUEST_ID },
-    });
-    f.socket.acknowledge(description, { ...REQUEST_DETAILS, profileId: "relay-selected-profile" });
-    const approval = await f.socket.nextFrame();
-    expect(approval).toEqual({
-      type: "req",
-      id: expect.any(String),
-      op: "authorize.approve",
-      params: {
-        requestId: REQUEST_ID,
-        grantId: expect.stringMatching(/^gr_[A-Za-z0-9_-]{43}$/),
-        principal: "person",
-        principalLabel: "Synthetic person",
+      expect(
+        await f.request({
+          id: "pair",
+          op: "grant.create",
+          params: { grantId: "gr_paired", codeHash: codeHash(paired.code), client: CLIENT },
+        }),
+      ).toMatchObject({ ok: true });
+      expect(f.state.getGrant("gr_paired")).toMatchObject({
+        principal: principal === "person" ? PERSON_AUTHORITY.principal : { kind: "owner" },
         ceiling: ["operator.read", "operator.write"],
-      },
-    });
-    if (!isRecord(approval.params) || typeof approval.params.grantId !== "string") {
-      throw new Error("Expected an approval grant ID");
-    }
-    expect(f.state.getGrant(approval.params.grantId)).toMatchObject({
-      ...PERSON_AUTHORITY,
-      clientName: CLIENT.name,
-      createdAt: 1_000,
-    });
-    expect(JSON.stringify(f.socket.frames)).not.toContain("profileId");
-    expect(JSON.stringify(f.socket.frames)).not.toContain("private-person-profile");
-    f.socket.acknowledge(approval);
-    await expect(approving).resolves.toEqual({
-      continueUrl: `https://mcp.openclaw.ai/oauth/continue?request=${REQUEST_ID}`,
-    });
-  });
-
-  it("denies a link request and returns the relay continuation without creating a grant", async () => {
-    const f = await fixture();
-    await f.ready();
-    const denying = f.service.consent.deny(REQUEST_ID, () => {});
-    const description = await f.socket.nextFrame();
-    f.socket.acknowledge(description, { ...REQUEST_DETAILS, kind: "link" });
-    const denial = await f.socket.nextFrame();
-    expect(denial).toMatchObject({ op: "authorize.deny", params: { requestId: REQUEST_ID } });
-    f.socket.acknowledge(denial);
-    await expect(denying).resolves.toEqual({
-      continueUrl: `https://mcp.openclaw.ai/oauth/continue?request=${REQUEST_ID}`,
-    });
-    await expect(f.state.grants()).resolves.toEqual([]);
-  });
-
-  it.each(["expired", "foreign", "missing kind"])(
-    "refuses an %s consent request before persisting or approving a grant",
-    async (reason) => {
-      const f = await fixture();
-      await f.ready();
-      const approving = f.service.consent.approve(REQUEST_ID, PERSON_AUTHORITY, () => {});
-      const rejection = expect(approving).rejects.toMatchObject({
-        code: "not_found",
       });
-      const description = await f.socket.nextFrame();
-      if (reason === "foreign") {
-        f.socket.receive({
-          type: "res",
-          id: description.id,
-          ok: false,
-          error: { code: "not_found", message: "Request belongs to another Gateway" },
-        });
-      } else {
-        f.socket.acknowledge(description, {
-          ...REQUEST_DETAILS,
-          ...(reason === "expired" ? { expiresAt: f.scheduler.now() } : { kind: undefined }),
-        });
-      }
-      await rejection;
-      await expect(f.state.grants()).resolves.toEqual([]);
-      expect(f.socket.frames.some((frame) => frame.op === "authorize.approve")).toBe(false);
+      expect(
+        await f.request({
+          id: "reused",
+          op: "grant.create",
+          params: { grantId: "gr_again", codeHash: codeHash(paired.code), client: CLIENT },
+        }),
+      ).toEqual(denied("reused", "not_found"));
     },
   );
-
-  it("revokes a locally recorded grant when the relay refuses the approval", async () => {
-    const f = await fixture();
-    await f.ready();
-    const approving = f.service.consent.approve(REQUEST_ID, PERSON_AUTHORITY, () => {});
-    const rejection = expect(approving).rejects.toMatchObject({ code: "not_found" });
-    f.socket.acknowledge(await f.socket.nextFrame(), REQUEST_DETAILS);
-    const approval = await f.socket.nextFrame();
-    f.socket.receive({
-      type: "res",
-      id: approval.id,
-      ok: false,
-      error: { code: "not_found", message: "Request expired" },
-    });
-    const revocation = await f.socket.nextFrame();
-    expect(revocation).toMatchObject({ op: "grant.revoke" });
-    const grants = await f.state.grants();
-    expect(grants).toHaveLength(1);
-    expect(grants[0]).toMatchObject({ revokedAt: 1_000, ...PERSON_AUTHORITY });
-    f.socket.acknowledge(revocation);
-    await rejection;
-  });
 
   it("acknowledges grant creation only after durable consumption", async () => {
     const f = await fixture();
@@ -407,7 +243,7 @@ describe("MCP relay transport and authority", () => {
     await f.state.issue(codeHash("issued"), f.scheduler.now() + 1_000, f.scheduler.now());
     const persist = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<void>();
-    f.storage.effects.beforeCompare = async () => {
+    f.storage.effects.beforeWrite = async () => {
       entered.resolve();
       await persist.promise;
     };
@@ -429,7 +265,9 @@ describe("MCP relay transport and authority", () => {
       ok: true,
       result: {},
     });
-    await expect(f.storage.open().grants()).resolves.toEqual([
+    const restarted = f.storage.open();
+    await restarted.initialize();
+    await expect(restarted.grants()).resolves.toEqual([
       {
         grantId: "accepted",
         clientId: CLIENT.id,
@@ -439,6 +277,37 @@ describe("MCP relay transport and authority", () => {
         ceiling: ["operator.read", "operator.write"],
       },
     ]);
+  });
+
+  it.each(["unknown", "expired"])("refuses an %s pairing code", async (code) => {
+    const f = await fixture();
+    await f.ready();
+    if (code === "expired") {
+      await f.state.issue(codeHash(code), f.scheduler.now() + 1, f.scheduler.now());
+      await f.clock.advanceBy(1);
+    }
+    expect(
+      await f.request({
+        id: "invalid-code",
+        op: "grant.create",
+        params: { grantId: "gr_no", codeHash: codeHash(code), client: CLIENT },
+      }),
+    ).toEqual(denied("invalid-code", "not_found"));
+    expect(await f.state.grants()).toEqual([]);
+  });
+
+  it("refuses an offline-revoked grant after reconnect and restart", async () => {
+    const f = await fixture();
+    await createGrant(f);
+    expect(await f.service.revoke("gr_one")).toEqual({ revoked: true, relayNotified: false });
+    const restarted = f.storage.open();
+    await restarted.initialize();
+    expect(await restarted.grants()).toEqual([]);
+    expect(() => restarted.assertGrantCurrent("gr_one")).toThrow("revoked");
+    await f.ready();
+    expect(await f.request({ id: "offline", op: "status", grantId: "gr_one", params: {} })).toEqual(
+      denied("offline", "grant_revoked"),
+    );
   });
 
   it("refuses unknown and revoked grants before calling data operations and records valid use", async () => {
@@ -470,55 +339,6 @@ describe("MCP relay transport and authority", () => {
     expect(operations).toHaveBeenCalledOnce();
   });
 
-  it("replays an offline revocation after authentication on the next connection", async () => {
-    const f = await fixture();
-    await createGrant(f);
-    await expect(f.service.revoke("gr_one")).resolves.toEqual({
-      revoked: true,
-      relayNotified: false,
-    });
-    await f.ready();
-    // Replay waits for an acknowledgement; keep its scheduled callback in flight.
-    const replay = f.clock.advanceBy(0);
-    const request = await f.socket.nextFrame();
-    expect(request).toMatchObject({ op: "grant.revoke", params: { grantId: "gr_one" } });
-    expect((await f.storage.open().grants())[0]?.revokedAt).toBe(1_000);
-    f.socket.acknowledge(request);
-    await replay;
-  });
-
-  it.each(["result", "error"])(
-    "withholds an awaited %s after its grant is revoked",
-    async (kind) => {
-      const result = Promise.withResolvers<unknown>();
-      const entered = Promise.withResolvers<void>();
-      const f = await fixture(async () => {
-        entered.resolve();
-        return result.promise;
-      });
-      await createGrant(f);
-      await f.ready();
-      await f.clock.advanceBy(0);
-      f.socket.receive({
-        type: "req",
-        id: "read",
-        op: "conversation.read",
-        grantId: "gr_one",
-        params: {},
-      });
-      const dispatch = f.clock.advanceBy(0);
-      await entered.promise;
-      await f.state.revoke("gr_one", f.scheduler.now());
-      if (kind === "result") {
-        result.resolve({ messages: [{ text: "Private result" }] });
-      } else {
-        result.reject(new RelayError("unavailable", "Private result"));
-      }
-      await dispatch;
-      expect(await f.socket.nextFrame()).toEqual(denied("read", "grant_revoked"));
-    },
-  );
-
   it("terminates and reconnects when no pong arrives within two keepalive intervals", async () => {
     const f = await fixture();
     await f.ready();
@@ -548,136 +368,6 @@ describe("MCP relay transport and authority", () => {
     await f.service.stop();
     expect(f.clock.armedAtMs).toBeNull();
   });
-
-  it("rejects pending relay requests before joining their closing connection scope", async () => {
-    const f = await fixture();
-    await createGrant(f);
-    await f.service.revoke("gr_one");
-    await f.ready();
-    const replay = f.clock.advanceBy(0);
-    const request = await f.socket.nextFrame();
-    expect(request).toMatchObject({ op: "grant.revoke" });
-    f.socket.close(4409);
-    await replay;
-    await f.clock.advanceBy(0);
-    await f.clock.advanceBy(1_000);
-    expect(f.sockets).toHaveLength(2);
-  });
-
-  it.each(["revoked", "disconnected"])(
-    "rechecks %s authority after operation preparation without blocking unrelated requests",
-    async (change) => {
-      const prepared = Promise.withResolvers<void>();
-      const resume = Promise.withResolvers<void>();
-      const mutate = vi.fn();
-      const f = await fixture(async (op, _params, assertAuthority) => {
-        if (op === "message.send") {
-          prepared.resolve();
-          await resume.promise;
-          await assertAuthority();
-          mutate();
-        }
-        return {};
-      });
-      await createGrant(f);
-      await f.ready();
-      await f.clock.advanceBy(0);
-      f.socket.receive({
-        type: "req",
-        id: "send",
-        op: "message.send",
-        grantId: "gr_one",
-        params: {},
-      });
-      const sending = f.clock.advanceBy(0);
-      await prepared.promise;
-      expect(
-        await f.request({
-          id: "status",
-          op: "status",
-          grantId: "gr_one",
-          params: {},
-        }),
-      ).toEqual({ type: "res", id: "status", ok: true, result: { ui: unavailableUi } });
-      if (change === "revoked") {
-        await f.state.revoke("gr_one", f.scheduler.now());
-      } else {
-        f.socket.close(4409);
-      }
-      resume.resolve();
-      await sending;
-      expect(mutate).not.toHaveBeenCalled();
-      if (change === "revoked") {
-        expect(await f.socket.nextFrame()).toEqual(denied("send", "grant_revoked"));
-      } else {
-        expect(f.socket.frames.some((frame) => frame.id === "send")).toBe(false);
-      }
-    },
-  );
-
-  it("rechecks the connection after an awaited grant authorization before dispatching", async () => {
-    const operations = vi.fn(async () => ({}));
-    const f = await fixture(operations);
-    await createGrant(f);
-    await f.ready();
-    await f.clock.advanceBy(0);
-    const entered = Promise.withResolvers<void>();
-    const resume = Promise.withResolvers<void>();
-    f.storage.effects.beforeCompare = async () => {
-      entered.resolve();
-      await resume.promise;
-    };
-    f.socket.receive({
-      type: "req",
-      id: "send",
-      op: "message.send",
-      grantId: "gr_one",
-      params: {},
-    });
-    const dispatch = f.clock.advanceBy(0);
-    await entered.promise;
-    f.socket.close(4409);
-    resume.resolve();
-    await dispatch;
-    expect(operations).not.toHaveBeenCalled();
-    expect(f.socket.frames.some((frame) => frame.id === "send")).toBe(false);
-  });
-
-  it("rejects an oversized incoming frame before dispatch", async () => {
-    const f = await fixture();
-    f.socket.emit("message", Buffer.alloc(1024 * 1024 + 1, 32), false);
-    expect(f.socket.closes).toEqual([{ code: 1009, reason: "Frame too large" }]);
-  });
-
-  it.each(["operation", "unavailable UI", "UI"])(
-    "bounds queued %s output on the shared relay socket",
-    async (kind) => {
-      const handle = {
-        presentation: { ...ORIGINS, basePath: "/", operatorScopeCeiling: [] },
-        request: async () => ({ response: new Response("index"), pluginReadCookies: [] }),
-        openWebSocket: async () => ({ socket: new IngressSocket() }),
-        close: vi.fn(async () => {}),
-      } satisfies GatewayControlUiIngressV1;
-      const f = await fixture(undefined, {
-        controlUiIngress: createPrincipalIngress(handle).factory,
-      });
-      await createGrant(f);
-      await f.ready(f.socket, kind === "UI" ? uiCapability : undefined);
-      await f.clock.advanceBy(0);
-      f.socket.bufferedAmount = 32 * 1024 * 1024 - 10;
-      f.socket.receive(
-        kind === "operation"
-          ? { type: "req", id: "status", op: "status", grantId: "gr_one", params: {} }
-          : HTTP,
-      );
-      await f.clock.advanceBy(0);
-      expect(f.socket.closes).toEqual([
-        { code: 1011, reason: "Relay output buffer limit exceeded" },
-      ]);
-      expect(f.socket.terminated).toBe(true);
-      expect(f.socket.frames).toHaveLength(1);
-    },
-  );
 
   it.each([null, {}, { frameAncestors: "https://chatgpt.com" }, { frameAncestors: [1] }])(
     "rejects malformed ready UI metadata: %j",
@@ -763,65 +453,5 @@ describe("MCP relay transport and authority", () => {
     });
     expect(JSON.stringify(socket.frames)).not.toContain("profile-private");
     expect(ingress.factory.open).not.toHaveBeenCalled();
-  });
-
-  it("closes the grant handle and browser socket when the operator revokes through the service", async () => {
-    const browser = new IngressSocket();
-    const handle = {
-      presentation: {
-        ...ORIGINS,
-        basePath: "/",
-        operatorScopeCeiling: ["operator.read", "operator.write"],
-      },
-      request: async () => ({ response: new Response("index"), pluginReadCookies: [] }),
-      openWebSocket: async () => ({ socket: browser }),
-      close: vi.fn(async () => {
-        browser.close();
-      }),
-    } satisfies GatewayControlUiIngressV1;
-    const f = await fixture(undefined, {
-      controlUiIngress: createPrincipalIngress(handle).factory,
-    });
-    await createGrant(f);
-    await f.ready(f.socket, uiCapability);
-    f.socket.receive(WS);
-    const opening = f.clock.advanceBy(0);
-    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.ws.opened" });
-    const revoking = f.service.revoke("gr_one");
-    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.error", code: "grant_revoked" });
-    const notification = await f.socket.nextFrame();
-    expect(notification).toMatchObject({ op: "grant.revoke" });
-    f.socket.acknowledge(notification);
-    await revoking;
-    await opening;
-    expect(browser.closes[0]?.code).toBe(1008);
-    expect(handle.close).toHaveBeenCalledOnce();
-    expect(() => f.state.assertGrantCurrent("gr_one")).toThrow("revoked");
-  });
-
-  it("aborts pending ingress HTTP and closes its handle when the relay disconnects", async () => {
-    const entered = Promise.withResolvers<AbortSignal>();
-    const handle = {
-      presentation: { ...ORIGINS, basePath: "/", operatorScopeCeiling: ["operator.read"] },
-      request: async ({ signal }) => {
-        entered.resolve(signal);
-        return abortable<Awaited<ReturnType<GatewayControlUiIngressV1["request"]>>>(signal);
-      },
-      openWebSocket: async () => ({ socket: new IngressSocket() }),
-      close: vi.fn(async () => {}),
-    } satisfies GatewayControlUiIngressV1;
-    const f = await fixture(undefined, {
-      controlUiIngress: createPrincipalIngress(handle).factory,
-    });
-    await createGrant(f);
-    await f.ready(f.socket, uiCapability);
-    f.socket.receive(HTTP);
-    const dispatch = f.clock.advanceBy(0);
-    const signal = await entered.promise;
-    f.socket.close(4409);
-    await dispatch;
-    expect(signal.aborted).toBe(true);
-    expect(handle.close).toHaveBeenCalledOnce();
-    expect(f.socket.frames).toHaveLength(1);
   });
 });

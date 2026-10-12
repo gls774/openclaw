@@ -1,74 +1,46 @@
 import { UiTunnelError } from "./ui-tunnel-protocol.js";
 
-/** Request chunks stay outside the stream's internal queue so their byte budget is explicit. */
 export class UiRequestBody {
   readonly stream: ReadableStream<Uint8Array>;
-  readonly #chunks: Uint8Array[] = [];
-  readonly #reserve: (bytes: number) => void;
-  readonly #release: (bytes: number) => void;
-  #wake?: () => void;
+  readonly #controller: ReadableStreamDefaultController<Uint8Array>;
   #ended = false;
-  #total = 0;
-  #error?: Error;
+  #hasBody = false;
 
-  constructor(reserve: (bytes: number) => void, release: (bytes: number) => void) {
-    this.#reserve = reserve;
-    this.#release = release;
-    this.stream = new ReadableStream<Uint8Array>(
-      {
-        pull: async (controller) => {
-          if (!this.#chunks.length && !this.#ended) {
-            await new Promise<void>((resolve) => {
-              this.#wake = resolve;
-            });
-          }
-          if (this.#error) {
-            controller.error(this.#error);
-            return;
-          }
-          const chunk = this.#chunks.shift();
-          if (chunk) {
-            this.#release(chunk.byteLength + 64);
-            controller.enqueue(chunk);
-          } else if (this.#ended) {
-            controller.close();
-          }
-        },
-        cancel: () => this.discard(),
+  constructor() {
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    this.stream = new ReadableStream<Uint8Array>({
+      start: (value) => {
+        controller = value;
       },
-      { highWaterMark: 0 },
-    );
+      cancel: () => {
+        this.#ended = true;
+      },
+    });
+    this.#controller = controller;
   }
 
   get hasBody(): boolean {
-    return this.#total > 0 || !this.#ended;
+    return this.#hasBody;
   }
 
   push(bytes: Uint8Array, more: boolean): void {
     if (this.#ended) {
       throw new UiTunnelError("invalid", "The HTTP request body is already complete.");
     }
-    this.#total += bytes.byteLength;
-    if (this.#total > 16 * 1024 * 1024) {
-      throw new UiTunnelError("limit_exceeded", "Control UI request bodies are limited to 16 MiB.");
-    }
+    this.#hasBody ||= bytes.byteLength > 0 || more;
     if (bytes.byteLength) {
-      this.#reserve(bytes.byteLength + 64);
-      this.#chunks.push(bytes);
+      this.#controller.enqueue(bytes);
     }
-    this.#ended = !more;
-    this.#wake?.();
-    this.#wake = undefined;
+    if (!more) {
+      this.#ended = true;
+      this.#controller.close();
+    }
   }
 
-  discard(error?: Error): void {
-    for (const chunk of this.#chunks) {
-      this.#release(chunk.byteLength + 64);
+  discard(error: Error): void {
+    if (!this.#ended) {
+      this.#ended = true;
+      this.#controller.error(error);
     }
-    this.#chunks.length = 0;
-    this.#ended = true;
-    this.#error = error;
-    this.#wake?.();
-    this.#wake = undefined;
   }
 }

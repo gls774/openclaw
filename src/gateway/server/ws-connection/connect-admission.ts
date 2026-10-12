@@ -181,15 +181,7 @@ export function resolveGatewayConnectPolicyFailure(
   state: AuthenticatedGatewayConnect,
 ): { kind: "auth" } | { kind: "origin"; reason: string } | undefined {
   const remoteIngress = getRemoteControlUiIngressContext(context.handler.upgradeReq);
-  if (
-    remoteIngress &&
-    (!hasCurrentRemoteControlUiIngress(remoteIngress) ||
-      remoteControlUiGatewayAuthError(
-        context.handler.getResolvedAuth(),
-        getRuntimeConfig(),
-        remoteIngress.principal,
-      ))
-  ) {
+  if (remoteIngress && !hasCurrentRemoteControlUiIngress(remoteIngress)) {
     return { kind: "auth" };
   }
   if (context.browserOrigin) {
@@ -291,7 +283,7 @@ export async function admitGatewayConnect(context: GatewayConnectPhaseContext) {
     close(1008, "invalid role");
     return undefined;
   }
-  // Default-deny: scopes must be explicit. Empty/missing scopes means no permissions.
+  // Default-deny, except signed ingress requests may select their live grant ceiling.
   // Note: If the client does not present a device identity, we can't bind scopes to a paired
   // device/token, so we will clear scopes after auth to avoid self-declared permissions.
   const scopes = Array.isArray(connectParams.scopes) ? connectParams.scopes : [];
@@ -309,12 +301,7 @@ export async function admitGatewayConnect(context: GatewayConnectPhaseContext) {
           ? "Remote Control UI ingress only admits the operator role."
           : !connectParams.device
             ? "Remote Control UI ingress requires a signed device identity."
-            : connectParams.auth?.deviceToken !== undefined ||
-                connectParams.auth?.token !== undefined ||
-                connectParams.auth?.password !== undefined ||
-                connectParams.auth?.bootstrapToken !== undefined ||
-                connectParams.auth?.approvalRuntimeToken !== undefined ||
-                connectParams.auth?.agentRuntimeIdentityToken !== undefined
+            : Object.values(connectParams.auth ?? {}).some((credential) => credential !== undefined)
               ? "Remote Control UI ingress requires a credential-free signed device; reconnect without stored credentials."
               : !roleScopesAllow({
                     role,

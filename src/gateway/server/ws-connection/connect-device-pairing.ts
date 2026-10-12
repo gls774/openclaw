@@ -66,11 +66,8 @@ export async function authorizeGatewayConnectDevice(
   context: GatewayConnectPhaseContext,
   state: AuthenticatedGatewayConnect,
 ): Promise<DeviceAuthorizedGatewayConnect | undefined> {
-  const assertIngressCurrent = () =>
-    assertRemoteControlUiIngressCurrent(
-      getRemoteControlUiIngressContext(context.handler.upgradeReq),
-    );
-  assertIngressCurrent();
+  const remoteIngress = getRemoteControlUiIngressContext(context.handler.upgradeReq);
+  const assertIngressCurrent = () => assertRemoteControlUiIngressCurrent(remoteIngress);
   const {
     connId,
     buildRequestContext,
@@ -197,12 +194,10 @@ export async function authorizeGatewayConnectDevice(
         devicePublicKey,
         scopes,
         hasRequestedScopes,
-        remoteIngressScopeCeiling: state.remoteIngressPrincipal?.scopes,
         connectionScopeCap: (capped: string[]) =>
           applyConnectionScopeCap({ scopes: capped, upgradeReq: context.handler.upgradeReq }),
       };
       const plan = await resolvePairingApprovalPlan(pairingPlanParams);
-      assertIngressCurrent();
       // Same-key reconnects reuse paired grants without pairing or false upgrade audits.
       if (
         reason === "scope-upgrade" &&
@@ -532,9 +527,8 @@ export async function authorizeGatewayConnectDevice(
     };
 
     const paired = await getPairedDevice(device.id);
-    assertIngressCurrent();
     const isPaired = paired?.publicKey === devicePublicKey;
-    if (paired && !isPaired && getRemoteControlUiIngressContext(context.handler.upgradeReq)) {
+    if (paired && !isPaired && remoteIngress) {
       failPairingHandshake({
         message:
           "Remote Control UI device key does not match the paired device; remove the stale device in Devices and reconnect with a fresh browser identity.",
@@ -583,7 +577,6 @@ export async function authorizeGatewayConnectDevice(
         clientAccessMetadata,
         requirePairing,
       });
-      assertIngressCurrent();
       if (!existingDevice.ok) {
         return undefined;
       }
@@ -615,7 +608,6 @@ export async function authorizeGatewayConnectDevice(
           hasApprovedDeviceBaseline: hasServerApprovedDeviceTokenBaseline,
           isIssuanceCurrent: isConnectAuthorizationCurrent,
         });
-  assertIngressCurrent();
 
   return {
     ...state,

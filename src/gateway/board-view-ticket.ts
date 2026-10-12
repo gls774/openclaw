@@ -6,8 +6,8 @@ import {
 } from "../plugins/registry-lifecycle.js";
 import type { PluginRegistry } from "../plugins/registry-types.js";
 import { safeEqualSecret } from "../security/secret-equal.js";
-import type { RemoteIngressPrincipalSnapshot } from "./remote-ingress-principal.js";
 import type { GatewayContextResolver, GatewayRequestContext } from "./server-methods/types.js";
+import type { RemoteIngressPrincipalSnapshot } from "./server/client-identity-types.js";
 
 export const BOARD_HTTP_PATH_PREFIX = "/__openclaw__/board/";
 // Bounds residual bearer access after the originating client loses its view authority.

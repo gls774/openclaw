@@ -1,6 +1,6 @@
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { registerListener } from "../../../src/shared/listeners.js";
-import { webKitHostWindow } from "./native-webkit-bridge.ts";
+import { webKitHostWindow, type WebKitHostMessages } from "./native-webkit-bridge.ts";
 import { isRemoteControlUiIngress } from "./remote-ingress.ts";
 
 export type NativeGateway = {
@@ -50,24 +50,19 @@ function embedderSnapshotFrom(value: unknown): NativeGatewaysSnapshot | null {
   ) {
     return null;
   }
-  const { gateways, currentId } = value.snapshot;
-  if (
-    typeof currentId !== "string" ||
-    !Array.isArray(gateways) ||
-    !gateways.every(
-      (gateway: unknown): gateway is NativeGateway =>
-        isRecord(gateway) &&
-        typeof gateway.id === "string" &&
-        typeof gateway.name === "string" &&
-        gateway.kind === "remote" &&
-        typeof gateway.isPrimary === "boolean" &&
-        typeof gateway.canPromote === "boolean" &&
-        (gateway.health === "ok" || gateway.health === "error" || gateway.health === "unknown"),
-    )
-  ) {
-    return null;
-  }
-  return { gateways, currentId };
+  const snapshot = snapshotFrom(value.snapshot);
+  return snapshot?.gateways.every(
+    (gateway: unknown): gateway is NativeGateway =>
+      isRecord(gateway) &&
+      typeof gateway.id === "string" &&
+      typeof gateway.name === "string" &&
+      gateway.kind === "remote" &&
+      typeof gateway.isPrimary === "boolean" &&
+      typeof gateway.canPromote === "boolean" &&
+      (gateway.health === "ok" || gateway.health === "error" || gateway.health === "unknown"),
+  )
+    ? { gateways: snapshot.gateways, currentId: snapshot.currentId }
+    : null;
 }
 
 function createNativeGatewaysCapability(): NativeGatewaysCapability | null {
@@ -75,63 +70,55 @@ function createNativeGatewaysCapability(): NativeGatewaysCapability | null {
     return null;
   }
   const nativeWindow = window as NativeGatewaysWindow;
-  const embedded = isRemoteControlUiIngress() && window.parent !== window;
+  const parent = window.parent;
+  const embedded = isRemoteControlUiIngress() && parent !== window;
   const handler = webKitHostWindow()?.webkit?.messageHandlers?.openclawGateways;
-  let snapshot = embedded ? null : snapshotFrom(nativeWindow["__OPENCLAW_NATIVE_GATEWAYS__"]);
-  const listeners = new Set<(snapshot: NativeGatewaysSnapshot) => void>();
-  const publish = (next: NativeGatewaysSnapshot) => {
-    snapshot = next;
-    listeners.forEach((listener) => listener(next));
-  };
-  let actions: Omit<NativeGatewaysCapability, "snapshot" | "subscribe">;
-  if (embedded) {
-    const parent = window.parent;
-    const post = (
-      message:
-        | { type: "openclaw.embedder.hello"; version: 1 }
-        | { type: "openclaw.embedder.select" | "openclaw.embedder.set-primary"; id: string }
-        | { type: "openclaw.embedder.open-settings" },
-    ) => parent.postMessage(message, "*");
-    window.addEventListener("message", (event: MessageEvent<unknown>) => {
-      if (event.source !== parent) {
-        return;
-      }
-      const next = embedderSnapshotFrom(event.data);
-      if (!next) {
-        return;
-      }
-      // Keep the existing display-only sidebar projection and its wake-up event.
-      nativeWindow["__OPENCLAW_NATIVE_GATEWAYS__"] = next;
-      publish(next);
-      window.dispatchEvent(new CustomEvent(NATIVE_GATEWAYS_CHANGED_EVENT, { detail: next }));
-    });
-    post({ type: "openclaw.embedder.hello", version: 1 });
-    actions = {
-      select: (id) => post({ type: "openclaw.embedder.select", id }),
-      setPrimary: (id) => post({ type: "openclaw.embedder.set-primary", id }),
-      openSettings: () => post({ type: "openclaw.embedder.open-settings" }),
-    };
-  } else if (handler?.postMessage) {
-    const post = handler.postMessage.bind(handler);
-    window.addEventListener(NATIVE_GATEWAYS_CHANGED_EVENT, (event: Event) => {
-      const next = snapshotFrom((event as CustomEvent<unknown>).detail);
-      if (next) {
-        publish(next);
-      }
-    });
-    actions = {
-      select: (id: string) => post({ type: "select", id }),
-      openWindow: (id: string) => post({ type: "open-window", id }),
-      setPrimary: (id: string) => post({ type: "set-primary", id }),
-      reconnect: (id: string) => post({ type: "reconnect", id }),
-      reconnectCancel: (id: string) => post({ type: "reconnect-cancel", id }),
-      openSettings: () => post({ type: "open-settings" }),
-    };
-  } else {
+  const post = embedded
+    ? (message: WebKitHostMessages["openclawGateways"]) =>
+        parent.postMessage({ ...message, type: `openclaw.embedder.${message.type}` }, "*")
+    : handler?.postMessage.bind(handler);
+  if (!post) {
     return null;
   }
+  let snapshot = embedded ? null : snapshotFrom(nativeWindow["__OPENCLAW_NATIVE_GATEWAYS__"]);
+  const listeners = new Set<(snapshot: NativeGatewaysSnapshot) => void>();
+  window.addEventListener(embedded ? "message" : NATIVE_GATEWAYS_CHANGED_EVENT, (event: Event) => {
+    let next: NativeGatewaysSnapshot | null;
+    if (embedded) {
+      // SAFETY: The selected event name matches the embedded transport.
+      const message = event as MessageEvent<unknown>;
+      if (message.source !== parent) {
+        return;
+      }
+      next = embedderSnapshotFrom(message.data);
+    } else {
+      next = snapshotFrom((event as CustomEvent<unknown>).detail);
+    }
+    if (!next) {
+      return;
+    }
+    snapshot = next;
+    if (embedded) {
+      nativeWindow["__OPENCLAW_NATIVE_GATEWAYS__"] = next;
+    }
+    listeners.forEach((listener) => listener(next));
+    if (embedded) {
+      // Keep the existing display-only sidebar projection and its wake-up event.
+      window.dispatchEvent(new CustomEvent(NATIVE_GATEWAYS_CHANGED_EVENT, { detail: next }));
+    }
+  });
+  if (embedded) {
+    parent.postMessage({ type: "openclaw.embedder.hello", version: 1 }, "*");
+  }
   return {
-    ...actions,
+    select: (id) => post({ type: "select", id }),
+    setPrimary: (id) => post({ type: "set-primary", id }),
+    openSettings: () => post({ type: "open-settings" }),
+    ...(!embedded && {
+      openWindow: (id: string) => post({ type: "open-window", id }),
+      reconnect: (id: string) => post({ type: "reconnect", id }),
+      reconnectCancel: (id: string) => post({ type: "reconnect-cancel", id }),
+    }),
     get snapshot() {
       return snapshot;
     },

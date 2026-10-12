@@ -8,10 +8,13 @@ import type { AuthenticatedGitHubIdentitySync } from "../github-user-identity.ty
 import type { GatewayOperatorAccessAuthority } from "../operator-access-policy.types.js";
 import type { GatewayOperatorRoleActor } from "../operator-role-actor.js";
 import type { PluginNodeCapabilityClient } from "../plugin-node-capability.js";
-import type { RemoteControlUiIngressContext } from "../remote-control-ui-context.js";
-import type { RemoteIngressPrincipalSnapshot } from "../remote-ingress-principal.js";
 import type { WorkerConnectionIdentity } from "../worker-environments/connection-identity.js";
-import type { GatewayWsBrowserOrigin } from "./client-identity-types.js";
+import type {
+  GatewayAuthenticatedUserProfile,
+  GatewayWsBrowserOrigin,
+  RemoteControlUiIngressContext,
+  RemoteIngressPrincipalSnapshot,
+} from "./client-identity-types.js";
 import type { GatewayConnectionTransport } from "./connection-transport.js";
 
 export type { GatewayWsBrowserOrigin } from "./client-identity-types.js";
@@ -58,13 +61,7 @@ export type GatewayWsClient = PluginNodeCapabilityClient & {
   /** Lifecycle-prepared canonical recipient; never a scope or authorization grant. */
   preparedRecipientProfileId?: string;
   preparedSessionProfile?: UserProfileIdentity;
-  authenticatedUserProfile?: {
-    profileId: string;
-    displayName: string | null;
-    avatarRevision: string;
-    hasAvatar: boolean;
-    updatedAt: number;
-  };
+  authenticatedUserProfile?: GatewayAuthenticatedUserProfile;
   clientIp?: string;
   /** Server-attested inputs for rechecking browser-origin policy after config publication. */
   browserOrigin?: GatewayWsBrowserOrigin;

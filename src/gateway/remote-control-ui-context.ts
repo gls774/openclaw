@@ -2,24 +2,9 @@ import type { IncomingMessage } from "node:http";
 import { isRedactedSecretValue } from "../config/redact-sentinel.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { GatewayIngressPrincipal } from "../plugins/gateway-ingress.types.js";
-import type { ResolvedGatewayAuth } from "./auth.js";
+import type { ResolvedGatewayAuth } from "./auth-resolve.js";
 import { readGatewayIngressTransport } from "./ingress-attribution.js";
-import type { RemoteIngressPrincipalSnapshot } from "./remote-ingress-principal.js";
-
-/** Core-retained grant authority; browser headers cannot create this context. */
-export type RemoteControlUiIngressContext = Readonly<{
-  pluginId: string;
-  audienceId: string;
-  publicOrigin: string;
-  sandboxOrigin: string;
-  principal: GatewayIngressPrincipal;
-  operatorScopeCeiling: readonly string[];
-  resolvePrincipal(): RemoteIngressPrincipalSnapshot;
-  frameAncestors: readonly string[];
-  signal: AbortSignal;
-  assertCurrent(): void;
-  trackWork<T>(work: Promise<T>): Promise<T>;
-}>;
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
 export function getRemoteControlUiIngressContext(
   req: IncomingMessage,
@@ -75,19 +60,4 @@ export function remoteControlUiGatewayAuthError(
     return "Remote Control UI ingress cannot use a redacted Gateway credential. Replace the configured token or password with its real value locally before opening ingress.";
   }
   return undefined;
-}
-
-export function assertRemoteControlUiGatewayAuth(
-  context: RemoteControlUiIngressContext | undefined,
-  auth: ResolvedGatewayAuth,
-  cfg: OpenClawConfig,
-): void {
-  if (!context) {
-    return;
-  }
-  assertRemoteControlUiIngressCurrent(context);
-  const error = remoteControlUiGatewayAuthError(auth, cfg, context.principal);
-  if (error) {
-    throw new Error(error);
-  }
 }

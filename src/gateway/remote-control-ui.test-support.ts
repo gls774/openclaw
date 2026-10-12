@@ -1,4 +1,4 @@
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
 export function createRemoteControlUiIngressTestContext(
   overrides: Partial<RemoteControlUiIngressContext> = {},

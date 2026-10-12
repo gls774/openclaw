@@ -1,18 +1,19 @@
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/index.js";
 import { GatewayControlUiIngressError } from "../plugins/gateway-ingress.types.js";
 import { captureGatewayOperatorRunAuthority } from "./operator-run-authority.js";
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
 import type { GatewayControlUiIngressHost } from "./remote-control-ui-ingress-host.js";
-import type { RemoteIngressPrincipalSnapshot } from "./remote-ingress-principal.js";
 import { dispatchGatewayRequestInProcess } from "./server-in-process-dispatch.js";
 import type { GatewayClient } from "./server-methods/client-types.js";
+import type {
+  RemoteControlUiIngressContext,
+  RemoteIngressPrincipalSnapshot,
+} from "./server/client-identity-types.js";
 
 /** Grant-owned RPC constructs its exact caller; ambient plugin invocation scopes never participate. */
 export async function requestRemoteIngressGateway<T>(input: {
   host: GatewayControlUiIngressHost;
   pluginId: string;
   resolvePrincipal(): RemoteIngressPrincipalSnapshot;
-  assertCurrent(): void;
   signal: AbortSignal;
   trackWork<U>(work: Promise<U>): Promise<U>;
   method: string;
@@ -20,6 +21,7 @@ export async function requestRemoteIngressGateway<T>(input: {
   requestSignal?: AbortSignal;
   ingressContext?: RemoteControlUiIngressContext;
 }): Promise<T> {
+  const principal = input.resolvePrincipal();
   const context = input.host.resolveGatewayContext?.();
   if (!context) {
     throw new GatewayControlUiIngressError(
@@ -27,13 +29,11 @@ export async function requestRemoteIngressGateway<T>(input: {
       "Gateway request dispatch is unavailable.",
     );
   }
-  const principal = input.resolvePrincipal();
   const signal = input.requestSignal
     ? AbortSignal.any([input.signal, input.requestSignal])
     : input.signal;
   const assertCurrent = () => {
     signal.throwIfAborted();
-    input.assertCurrent();
     principal.assertCurrent();
     if (input.host.resolveGatewayContext?.() !== context) {
       throw new GatewayControlUiIngressError("closed", "Gateway request owner was replaced.");

@@ -9,8 +9,8 @@ import { rejectWebSocketUpgrade } from "../../shared/websocket-upgrade-reject.js
 import {
   getRemoteControlUiIngressContext,
   hasCurrentRemoteControlUiIngress,
-  type RemoteControlUiIngressContext,
 } from "../remote-control-ui-context.js";
+import type { RemoteControlUiIngressContext } from "../server/client-identity-types.js";
 import { startWebSocketKeepalive } from "../websocket-keepalive.js";
 import type { DesktopAudioSource } from "./managed-linux-audio.js";
 import type { DesktopObserveRequester } from "./observe-requester.js";

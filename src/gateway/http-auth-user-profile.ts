@@ -140,24 +140,16 @@ export async function resolveAuthenticatedHttpUserProfile(params: {
       operatorAccessAuthority: principal.operatorAccessAuthority,
     };
   }
-  const readAdmissionPolicy = (cfg: OpenClawConfig) => {
-    // Snapshot policy facts; service authority retains live closures and is checked separately.
-    const { remoteControlUiIngress: _ingress, ...browserOrigin } = resolveBrowserOriginPolicy({
-      req: params.req,
-      cfg,
-    });
-    return {
-      // HTTP admission never consumes WebSocket identity grants.
-      auth: { ...cfg.gateway?.auth, identityScopes: undefined },
-      roles: cfg.gateway?.roles,
-      trustedProxies: cfg.gateway?.trustedProxies,
-      allowRealIpFallback: cfg.gateway?.allowRealIpFallback,
-      browserOrigin,
-    };
-  };
+  const readAdmissionPolicy = (cfg: OpenClawConfig) => ({
+    // HTTP admission never consumes WebSocket identity grants.
+    auth: { ...cfg.gateway?.auth, identityScopes: undefined },
+    roles: cfg.gateway?.roles,
+    trustedProxies: cfg.gateway?.trustedProxies,
+    allowRealIpFallback: cfg.gateway?.allowRealIpFallback,
+    browserOrigin: resolveBrowserOriginPolicy({ req: params.req, cfg }),
+  });
   const admissionPolicy = structuredClone(readAdmissionPolicy(params.cfg));
   const assertCurrent = () => {
-    assertRemoteControlUiIngressCurrent(ingress);
     if (
       params.req.aborted ||
       params.req.socket?.destroyed ||

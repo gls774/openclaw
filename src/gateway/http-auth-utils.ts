@@ -67,7 +67,7 @@ import { resolveBrowserOriginPolicy } from "./origin-check.js";
 import { withSerializedCredentialFallbackAttempt } from "./rate-limit-attempt-serialization.js";
 import {
   getRemoteControlUiIngressContext,
-  assertRemoteControlUiGatewayAuth,
+  assertRemoteControlUiIngressCurrent,
 } from "./remote-control-ui-context.js";
 import { resolveSharedGatewaySessionGeneration } from "./server/ws-shared-generation.js";
 
@@ -207,8 +207,7 @@ async function checkHttpOperatorCredentials(
   const { auth, token } = params;
   const remoteIngress = getRemoteControlUiIngressContext(params.req);
   if (remoteIngress) {
-    assertRemoteControlUiGatewayAuth(remoteIngress, auth, params.cfg ?? getRuntimeConfig());
-    remoteIngress.resolvePrincipal().assertCurrent();
+    assertRemoteControlUiIngressCurrent(remoteIngress);
     return {
       authResult: token
         ? { ok: false, reason: "unauthorized" }
@@ -330,19 +329,10 @@ export async function authorizeControlUiReadRequestOrReply(
     );
   }
   const token = resolveControlUiReadAuthToken(params.req, params.allowQueryToken);
-  const remoteIngress = getRemoteControlUiIngressContext(params.req);
-  assertRemoteControlUiGatewayAuth(remoteIngress, auth, cfg);
-  // The grant selects ingress authority; reusable credentials cannot select another principal.
-  const { authResult, authGeneration, deviceOperatorScopes }: HttpOperatorCredentialResult =
-    remoteIngress && !token
-      ? {
-          authResult: { ok: true, method: "remote-ingress" },
-          authGeneration: resolveSharedGatewaySessionGeneration(auth, params.trustedProxies),
-        }
-      : await checkHttpOperatorCredentials(
-          { ...params, cfg, auth, token, rateLimiter: token ? params.rateLimiter : undefined },
-          authorizeControlUiReadHttpGatewayConnect,
-        );
+  const { authResult, authGeneration, deviceOperatorScopes } = await checkHttpOperatorCredentials(
+    { ...params, cfg, auth, token, rateLimiter: token ? params.rateLimiter : undefined },
+    authorizeControlUiReadHttpGatewayConnect,
+  );
   if (!authResult.ok) {
     if (params.replyOnFailure !== false) {
       sendGatewayAuthFailure(params.res, authResult);

@@ -63,7 +63,6 @@ import {
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-  assertRemoteControlUiGatewayAuth,
 } from "./remote-control-ui-context.js";
 import {
   resolveRemoteControlUiHttpRoute,
@@ -154,10 +153,7 @@ export function createGatewayHttpRequestHandler(
     expectation?: "continue" | "reject",
   ): Promise<"failed" | undefined> {
     const remoteIngress = getRemoteControlUiIngressContext(req);
-    if (remoteIngress) {
-      assertRemoteControlUiIngressCurrent(remoteIngress);
-      assertRemoteControlUiGatewayAuth(remoteIngress, getResolvedAuth(), loadGatewayConfig());
-    }
+    assertRemoteControlUiIngressCurrent(remoteIngress);
     // Legacy ports retain their plugin's raw URLs and wire responses, not Gateway endpoints.
     if (getWebhookLegacyListener(req)) {
       try {
@@ -690,18 +686,13 @@ export function createGatewayHttpRequestHandler(
 
       // A completed or disconnected response owns the request even when a stage reports fallthrough.
       for (const stage of requestStages) {
-        if (remoteIngress) {
-          assertRemoteControlUiIngressCurrent(remoteIngress);
-        }
-        const handled = await stage();
-        if (remoteIngress) {
-          assertRemoteControlUiIngressCurrent(remoteIngress);
-        }
-        if (handled || res.destroyed || res.writableEnded) {
+        assertRemoteControlUiIngressCurrent(remoteIngress);
+        if ((await stage()) || res.destroyed || res.writableEnded) {
           return undefined;
         }
       }
 
+      assertRemoteControlUiIngressCurrent(remoteIngress);
       // Startup owns sidecar readiness. The plugin registry is still empty here, so an
       // unclaimed path may be a plugin route that would otherwise dead-end as a transient 404.
       if (opts.isStartupPluginRuntimeReady?.() === false) {

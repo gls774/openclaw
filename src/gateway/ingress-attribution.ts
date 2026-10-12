@@ -10,7 +10,7 @@ import {
   resolveClientIp,
   resolveRequestClientIpFromHeaders,
 } from "./net.js";
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
 export const PROXY_ATTRIBUTION_REQUIRED_REASON = "proxy_attribution_required";
 export const PROXY_ATTRIBUTION_GUIDANCE =

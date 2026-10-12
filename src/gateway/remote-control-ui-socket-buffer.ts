@@ -9,6 +9,7 @@ type WriteCallback = (error: Error | null | undefined) => void;
 /** Bound the producer's public write queue until the peer's native parser consumes it. */
 export function bindRemoteControlUiSocketBuffer(params: {
   writer: Duplex;
+  onWrite: () => void;
   reader: Duplex;
   assertCurrent: () => void;
   reserveBytes: (bytes: number) => () => void;
@@ -23,6 +24,7 @@ export function bindRemoteControlUiSocketBuffer(params: {
     if (count === 0) {
       return;
     }
+    params.onWrite();
     try {
       bytes.retain(count);
     } catch (error) {

@@ -20,7 +20,6 @@ import {
   prepareGatewayIngressAttribution,
 } from "./ingress-attribution.js";
 import { checkGatewayWsBrowserOrigin } from "./origin-check.js";
-import { getRemoteControlUiIngressContext } from "./remote-control-ui-context.js";
 import { createRemoteControlUiIngressTestContext } from "./remote-control-ui.test-support.js";
 import { admitGatewayConnect } from "./server/ws-connection/connect-admission.js";
 import type { GatewayConnectPhaseContext } from "./server/ws-connection/message-handler-types.js";
@@ -180,26 +179,16 @@ describe("remote Control UI ingress security", () => {
       message: "requires a signed device identity",
     },
     { name: "node role", change: { role: "node" }, message: "only admits the operator role" },
-    {
-      name: "paired device token",
-      change: { auth: { deviceToken: "paired-test-token" } },
+    ...[
+      { deviceToken: "synthetic-credential" },
+      { token: "synthetic-credential" },
+      { password: "synthetic-credential" },
+      { bootstrapToken: "synthetic-credential" },
+    ].map((auth) => ({
+      name: Object.keys(auth)[0],
+      change: { auth },
       message: "credential-free signed device",
-    },
-    {
-      name: "shared token",
-      change: { auth: { token: "shared-test-token" } },
-      message: "credential-free signed device",
-    },
-    {
-      name: "shared password",
-      change: { auth: { password: "shared-test-password" } },
-      message: "credential-free signed device",
-    },
-    {
-      name: "bootstrap token",
-      change: { auth: { bootstrapToken: "bootstrap-test" } },
-      message: "credential-free signed device",
-    },
+    })),
     ...[
       "operator.admin",
       "operator.approvals",
@@ -245,7 +234,6 @@ describe("remote Control UI ingress security", () => {
       markHandshakeFailure: vi.fn(),
       sendHandshakeErrorResponse,
     } as unknown as GatewayConnectPhaseContext;
-    expect(getRemoteControlUiIngressContext(req)).toBeDefined();
     await expect(admitGatewayConnect(context)).resolves.toBeUndefined();
     expect(sendHandshakeErrorResponse).toHaveBeenCalledWith(
       "FORBIDDEN",

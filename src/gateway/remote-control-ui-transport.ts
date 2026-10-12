@@ -5,7 +5,7 @@ import {
   type ClientRequestArgs,
   type IncomingMessage,
 } from "node:http";
-import { Duplex, PassThrough, Readable, Writable } from "node:stream";
+import { duplexPair } from "node:stream";
 import { WebSocket, type RawData } from "../../packages/gateway-client/src/websocket.js";
 import {
   GatewayControlUiIngressError,
@@ -17,10 +17,10 @@ import {
 import { readGatewayPluginReadCookies } from "./control-ui-plugin-auth-cookie.js";
 import { markGatewayIngressTransport } from "./ingress-attribution.js";
 import { MAX_PAYLOAD_BYTES } from "./payload-limits.js";
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
 import { createRemoteControlUiResponseAccounting } from "./remote-control-ui-http-response.js";
 import type { GatewayControlUiIngressHost } from "./remote-control-ui-ingress-host.js";
 import { bindRemoteControlUiSocketBuffer } from "./remote-control-ui-socket-buffer.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
 const MAX_BODY_BYTES = 100 * 1024 * 1024;
 const MAX_QUEUED_MESSAGES = 64;
@@ -58,15 +58,8 @@ export function createRemoteControlUiTransport(params: {
     return promise;
   }
 
-  function assertCurrent(): void {
-    lifetime.signal.throwIfAborted();
-    host.signal.throwIfAborted();
-    context.signal.throwIfAborted();
-    context.assertCurrent();
-  }
-
   function openOperation(inputSignal: AbortSignal, timeoutMs?: number) {
-    assertCurrent();
+    context.assertCurrent();
     const controller = new AbortController();
     const signal = AbortSignal.any([
       inputSignal,
@@ -76,7 +69,8 @@ export function createRemoteControlUiTransport(params: {
       controller.signal,
     ]);
     signal.throwIfAborted();
-    const streams: Duplex[] = [];
+    const [client, serverSocket] = duplexPair({ highWaterMark: 64 * 1024 });
+    const streams = [client, serverSocket];
     const streamClosed: Promise<void>[] = [];
     let finished = false;
     let resolveDone!: () => void;
@@ -118,12 +112,10 @@ export function createRemoteControlUiTransport(params: {
     signal.addEventListener("abort", destroy, { once: true });
     const check = () => {
       signal.throwIfAborted();
-      assertCurrent();
+      context.assertCurrent();
     };
     const operationContext = Object.freeze({ ...context, signal, assertCurrent: check });
 
-    const left = new PassThrough({ highWaterMark: 64 * 1024 });
-    const right = new PassThrough({ highWaterMark: 64 * 1024 });
     // Gateway owners treat upgrade sockets as net.Socket (WebSocket keepalive arms
     // setTimeout), so the server side keeps net.Socket inactivity-timeout semantics.
     let idleMs = 0;
@@ -133,45 +125,7 @@ export function createRemoteControlUiTransport(params: {
       idleTimer = idleMs > 0 ? setTimeout(() => serverSocket.emit("timeout"), idleMs) : undefined;
       idleTimer?.unref();
     };
-    const makeSide = (readable: PassThrough, destination: PassThrough) =>
-      Duplex.fromWeb({
-        readable: Readable.toWeb(readable, {
-          strategy: { highWaterMark: 64 * 1024, size: (chunk: Uint8Array) => chunk.byteLength },
-        }),
-        writable: Writable.toWeb(
-          new Writable({
-            highWaterMark: 64 * 1024,
-            write(chunk: Buffer, _encoding, callback) {
-              touch();
-              try {
-                check();
-                destination.write(chunk, (error) => {
-                  try {
-                    check();
-                    callback(error);
-                  } catch (failure) {
-                    callback(asError(failure));
-                  }
-                });
-              } catch (error) {
-                callback(asError(error));
-              }
-            },
-            final(callback) {
-              destination.end(callback);
-            },
-            destroy(error, callback) {
-              // A finished writer can still have unread peer bytes; allow their normal drain.
-              if (error || !this.writableFinished) {
-                destination.destroy(error ?? undefined);
-              }
-              callback(error);
-            },
-          }),
-        ),
-      });
-    const client = makeSide(left, right);
-    const serverSocket = Object.defineProperties(makeSide(right, left), {
+    Object.defineProperties(serverSocket, {
       timeout: { get: () => idleMs },
       setTimeout: {
         value(ms: number, onTimeout?: () => void) {
@@ -189,6 +143,7 @@ export function createRemoteControlUiTransport(params: {
     void done.then(() => clearTimeout(idleTimer));
     const releaseClientBytes = bindRemoteControlUiSocketBuffer({
       writer: client,
+      onWrite: touch,
       reader: serverSocket,
       assertCurrent: check,
       reserveBytes,
@@ -196,6 +151,7 @@ export function createRemoteControlUiTransport(params: {
     });
     const releaseServerBytes = bindRemoteControlUiSocketBuffer({
       writer: serverSocket,
+      onWrite: touch,
       reader: client,
       assertCurrent: check,
       reserveBytes,
@@ -205,7 +161,6 @@ export function createRemoteControlUiTransport(params: {
       releaseClientBytes();
       releaseServerBytes();
     });
-    streams.push(client, serverSocket);
     for (const stream of streams) {
       streamClosed.push(
         new Promise<void>((resolve) => {
@@ -214,7 +169,7 @@ export function createRemoteControlUiTransport(params: {
       );
     }
     // Both directions belong to one operation, including parser and writer failures.
-    for (const stream of [left, right, ...streams]) {
+    for (const stream of streams) {
       stream.on("error", abort);
     }
     const responseBytes = createRemoteControlUiResponseAccounting({
@@ -258,12 +213,10 @@ export function createRemoteControlUiTransport(params: {
       serverResponse = res;
       markGatewayIngressTransport(req, { kind: "remote-forwarded", context: op.context });
       const handler = input.surface === "sandbox" ? host.handleSandboxRequest : host.handleRequest;
-      const work = Promise.resolve()
-        .then(() => {
-          op.check();
-          return handler(req, res);
-        })
-        .then(() => op.check());
+      const work = Promise.resolve().then(() => {
+        op.check();
+        return handler(req, res);
+      });
       handlerWork = work;
       void track(work).catch(op.abort);
     });
@@ -312,13 +265,11 @@ export function createRemoteControlUiTransport(params: {
             const releaseChunk = reserveBytes(part.value.byteLength);
             try {
               for (let offset = 0; offset < part.value.byteLength; offset += 64 * 1024) {
-                op.check();
                 await new Promise<void>((resolve, reject) => {
                   req.write(part.value.subarray(offset, offset + 64 * 1024), (error) =>
                     error ? reject(error) : resolve(),
                   );
                 });
-                op.check();
                 progress();
               }
             } finally {
@@ -355,7 +306,6 @@ export function createRemoteControlUiTransport(params: {
         {
           async pull(controller) {
             try {
-              op.check();
               const part = await iterator.next();
               op.check();
               progress();
@@ -370,7 +320,6 @@ export function createRemoteControlUiTransport(params: {
               if (receivedBytes > MAX_BODY_BYTES) {
                 throw limitError("Remote Control UI HTTP response exceeds 100 MiB");
               }
-              op.check();
               op.responseBytes.consume(chunk.byteLength);
               controller.enqueue(chunk);
             } catch (error) {
@@ -414,12 +363,10 @@ export function createRemoteControlUiTransport(params: {
     op.server.on("upgrade", (req, socket, head) => {
       // Accepted Gateway work belongs to the grant, independently of browser transport loss.
       markGatewayIngressTransport(req, { kind: "remote-forwarded", context });
-      const work = Promise.resolve()
-        .then(() => {
-          op.check();
-          return host.handleUpgrade(req, socket, head);
-        })
-        .then(() => op.check());
+      const work = Promise.resolve().then(() => {
+        op.check();
+        return host.handleUpgrade(req, socket, head);
+      });
       upgradeWork = work;
       void track(work).catch(op.abort);
     });
@@ -565,7 +512,6 @@ export function createRemoteControlUiTransport(params: {
               );
             }),
           );
-          op.check();
         } catch (error) {
           throw asError(op.signal.aborted ? op.signal.reason : error);
         } finally {
@@ -590,7 +536,6 @@ export function createRemoteControlUiTransport(params: {
                 if (ended && queue.length === 0) {
                   discard();
                 }
-                op.check();
                 yield entry.message;
                 continue;
               }
@@ -602,7 +547,6 @@ export function createRemoteControlUiTransport(params: {
                 notify = resolve;
               });
               notify = undefined;
-              op.check();
             }
           } finally {
             discard();

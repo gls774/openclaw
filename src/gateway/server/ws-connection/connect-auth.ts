@@ -17,10 +17,7 @@ import { captureGatewayAuthPolicy } from "../../auth-policy.js";
 import { AUTH_RATE_LIMIT_SCOPE_SHARED_SECRET } from "../../auth-rate-limit.js";
 import type { GatewayAuthResult } from "../../auth.js";
 import { withSerializedCredentialFallbackAttempt } from "../../rate-limit-attempt-serialization.js";
-import {
-  assertRemoteControlUiIngressCurrent,
-  getRemoteControlUiIngressContext,
-} from "../../remote-control-ui-context.js";
+import { getRemoteControlUiIngressContext } from "../../remote-control-ui-context.js";
 import { formatForLog } from "../../ws-log.js";
 import { truncateCloseReason } from "../close-reason.js";
 import { resolveSharedGatewaySessionGeneration } from "../ws-shared-generation.js";
@@ -76,8 +73,6 @@ async function authenticateGatewayConnectCore(
   context: GatewayConnectPhaseContext,
 ): Promise<AuthenticatedGatewayConnect | undefined> {
   const remoteIngress = getRemoteControlUiIngressContext(context.handler.upgradeReq);
-  const assertCurrent = () => assertRemoteControlUiIngressCurrent(remoteIngress);
-  assertCurrent();
   const {
     upgradeReq,
     connId,
@@ -112,7 +107,6 @@ async function authenticateGatewayConnectCore(
   const resolvedAuth = getResolvedAuth();
   const hasRequestedScopes = Array.isArray(connectParams.scopes);
   const admission = await admitGatewayConnect(context);
-  assertCurrent();
   if (!admission) {
     return undefined;
   }
@@ -142,7 +136,6 @@ async function authenticateGatewayConnectCore(
     clientIp: browserRateLimitClientIp,
   });
   const { sharedAuthOk, pendingSharedAuthFailure, bootstrapTokenCandidate } = connectAuthState;
-  assertCurrent();
   let { authResult, authOk, authMethod } = connectAuthState;
   let rejectedPendingSharedAuthFailure = pendingSharedAuthFailure;
   const settleRejectedSharedAuthFailure = async () => {
@@ -367,12 +360,10 @@ async function authenticateGatewayConnectCore(
           return await verifyDeviceToken({
             ...paramsLocal,
             requiredSharedGatewaySessionGeneration: getRequiredSharedGatewaySessionGeneration?.(),
-            assertCurrent,
           });
         },
       });
   ({ authResult, authOk, authMethod } = authDecision);
-  assertCurrent();
   const deviceTokenSharedGatewaySessionGeneration =
     authDecision.deviceTokenSharedGatewaySessionGeneration;
   ({ pairingLocality, skipLocalBackendSelfPairing } = resolvePairingContext());

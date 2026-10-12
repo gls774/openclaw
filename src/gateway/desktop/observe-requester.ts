@@ -1,5 +1,5 @@
-import type { RemoteIngressPrincipalSnapshot } from "../remote-ingress-principal.js";
 import type { GatewayClient } from "../server-methods/client-types.js";
+import type { RemoteIngressPrincipalSnapshot } from "../server/client-identity-types.js";
 
 export type DesktopObserveRequester = {
   connId?: string;

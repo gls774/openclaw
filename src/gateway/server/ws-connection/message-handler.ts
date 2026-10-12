@@ -1,5 +1,4 @@
 import { rawDataToString } from "@openclaw/gateway-client/websocket-data";
-import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
 import {
   asOptionalObjectRecord,
   readStringField,
@@ -115,12 +114,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
           reject(err);
           return;
         }
-        try {
-          assertRemoteControlUiIngressCurrent(remoteIngress);
-          resolve();
-        } catch (error) {
-          reject(toErrorObject(error, "Remote Control UI authority changed during send"));
-        }
+        resolve();
       });
     });
 
@@ -362,7 +356,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
             origin: requestOrigin,
             isLocalClient,
             enforceOriginCheckForAnyClient,
-            remoteControlUiIngress: getRemoteControlUiIngressContext(params.upgradeReq),
+            remoteControlUiIngress: remoteIngress,
           }),
           browserRateLimitClientIp,
           authRateLimiter,
@@ -383,17 +377,14 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
           releasePendingNodePairingCleanup,
         } satisfies GatewayConnectPhaseContext;
         const authenticated = await authenticateGatewayConnect(phaseContext);
-        assertRemoteControlUiIngressCurrent(remoteIngress);
         if (!authenticated) {
           return;
         }
         const deviceAuthorized = await authorizeGatewayConnectDevice(phaseContext, authenticated);
-        assertRemoteControlUiIngressCurrent(remoteIngress);
         if (!deviceAuthorized) {
           return;
         }
         await attachAuthenticatedGatewayConnect(phaseContext, deviceAuthorized);
-        assertRemoteControlUiIngressCurrent(remoteIngress);
         runDetachedConnectWork(
           () => publishConnectModelCatalog(params, authenticatedRequestDispatcher),
           (error) =>

@@ -6,16 +6,34 @@ import { WebSocketServer } from "../../packages/gateway-client/src/websocket.js"
 import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import type { GatewayControlUiIngressRequestV1 } from "../plugins/gateway-ingress.types.js";
 import { markGatewayIngressTransport, readGatewayIngressTransport } from "./ingress-attribution.js";
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
 import type { GatewayControlUiIngressHost } from "./remote-control-ui-ingress-host.js";
 import { createRemoteControlUiTransport } from "./remote-control-ui-transport.js";
 import { createRemoteControlUiIngressTestContext } from "./remote-control-ui.test-support.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 import { startWebSocketKeepalive } from "./websocket-keepalive.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
   await Promise.all(cleanups.splice(0).map((close) => close()));
 });
+
+function websocketServer() {
+  const server = new WebSocketServer({ noServer: true });
+  cleanups.push(
+    () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      }),
+  );
+  return server;
+}
+
+const websocketRequest = {
+  pathAndQuery: "/claw",
+  origin: "https://ui.example.test",
+  protocols: [],
+  signal: new AbortController().signal,
+};
 
 function fixture(
   overrides: Partial<GatewayControlUiIngressHost> = {},
@@ -284,13 +302,7 @@ describe("remote Control UI memory transport", () => {
   );
 
   it("uses real WebSocket text/binary framing and fences stale message sends", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const { transport, revoke, reserved } = fixture({
       handleUpgrade: async (req, socket, head) => {
         expect(readGatewayIngressTransport(req)?.kind).toBe("remote-forwarded");
@@ -300,12 +312,7 @@ describe("remote Control UI memory transport", () => {
         });
       },
     });
-    const { socket } = await transport.openWebSocket({
-      pathAndQuery: "/claw",
-      origin: "https://ui.example.test",
-      protocols: [],
-      signal: new AbortController().signal,
-    });
+    const { socket } = await transport.openWebSocket(websocketRequest);
     const reader = socket.messages[Symbol.asyncIterator]();
     await expect(
       socket.send({ kind: "binary", bytes: new Uint8Array(25 * 1024 * 1024 + 1) }),
@@ -328,13 +335,7 @@ describe("remote Control UI memory transport", () => {
   it("gives upgraded sockets net.Socket timeouts so Gateway keepalive can arm them", async () => {
     vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout"] });
     try {
-      const wss = new WebSocketServer({ noServer: true });
-      cleanups.push(
-        () =>
-          new Promise<void>((resolve) => {
-            wss.close(() => resolve());
-          }),
-      );
+      const wss = websocketServer();
       const accepted = createDeferred<IncomingMessage["socket"]>();
       const missedPong = vi.fn();
       const { transport } = fixture({
@@ -345,12 +346,7 @@ describe("remote Control UI memory transport", () => {
           });
         },
       });
-      await transport.openWebSocket({
-        pathAndQuery: "/claw",
-        origin: "https://ui.example.test",
-        protocols: [],
-        signal: new AbortController().signal,
-      });
+      await transport.openWebSocket(websocketRequest);
       const upgraded = await accepted.promise;
       // Before the fix, the first keepalive tick threw `transport.setTimeout is not a function`.
       expect(() => vi.advanceTimersByTime(25_000)).not.toThrow();
@@ -365,13 +361,7 @@ describe("remote Control UI memory transport", () => {
   });
 
   it("closes a WebSocket whose unread messages exceed the bounded receive queue", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const { transport, reserved } = fixture({
       handleUpgrade: async (req, socket, head) => {
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -381,12 +371,7 @@ describe("remote Control UI memory transport", () => {
         });
       },
     });
-    const opened = transport.openWebSocket({
-      pathAndQuery: "/claw",
-      origin: "https://ui.example.test",
-      protocols: [],
-      signal: new AbortController().signal,
-    });
+    const opened = transport.openWebSocket(websocketRequest);
     await expect(
       opened.then(async ({ socket }) => {
         await socket.closed;
@@ -398,13 +383,7 @@ describe("remote Control UI memory transport", () => {
   });
 
   it("bounds WebSocket output bursts before the native socket can enqueue them", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const chunk = new Uint8Array(32 * 1024);
     let peakBufferedBytes = 0;
     const { transport, reserved } = fixture(
@@ -420,27 +399,16 @@ describe("remote Control UI memory transport", () => {
       },
       96 * 1024,
     );
-    await expect(
-      transport.openWebSocket({
-        pathAndQuery: "/claw",
-        origin: "https://ui.example.test",
-        protocols: [],
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow("Plugin buffer quota exceeded");
+    await expect(transport.openWebSocket(websocketRequest)).rejects.toThrow(
+      "Plugin buffer quota exceeded",
+    );
     expect(peakBufferedBytes).toBeLessThanOrEqual(96 * 1024);
     await transport.close();
     expect(reserved()).toBe(0);
   });
 
   it("transfers a maximum-sized WebSocket frame within the plugin buffer budget", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const { transport, reserved } = fixture(
       {
         handleUpgrade: async (req, socket, head) => {
@@ -451,12 +419,7 @@ describe("remote Control UI memory transport", () => {
       },
       64 * 1024 * 1024,
     );
-    const { socket } = await transport.openWebSocket({
-      pathAndQuery: "/claw",
-      origin: "https://ui.example.test",
-      protocols: [],
-      signal: new AbortController().signal,
-    });
+    const { socket } = await transport.openWebSocket(websocketRequest);
     await socket.send({ kind: "binary", bytes: new Uint8Array(25 * 1024 * 1024) });
     const message = await socket.messages[Symbol.asyncIterator]().next();
     expect(message.value?.kind).toBe("binary");
@@ -468,13 +431,7 @@ describe("remote Control UI memory transport", () => {
   });
 
   it("retains a final WebSocket response and its quota until the closed socket is drained", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const { transport, reserved } = fixture({
       handleUpgrade: async (req, socket, head) => {
         wss.handleUpgrade(req, socket, head, (ws) => {
@@ -483,12 +440,7 @@ describe("remote Control UI memory transport", () => {
         });
       },
     });
-    const { socket, completion } = await transport.openWebSocket({
-      pathAndQuery: "/claw",
-      origin: "https://ui.example.test",
-      protocols: [],
-      signal: new AbortController().signal,
-    });
+    const { socket, completion } = await transport.openWebSocket(websocketRequest);
     let completed = false;
     void completion.then(() => {
       completed = true;
@@ -504,13 +456,7 @@ describe("remote Control UI memory transport", () => {
   });
 
   it("keeps accepted WebSocket authority with the grant when the browser transport disconnects", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const admitted = createDeferred<RemoteControlUiIngressContext>();
     const { transport, revoke } = fixture({
       handleUpgrade: async (req, socket, head) => {
@@ -539,24 +485,13 @@ describe("remote Control UI memory transport", () => {
   });
 
   it("settles a remotely closed WebSocket immediately when no messages remain", async () => {
-    const wss = new WebSocketServer({ noServer: true });
-    cleanups.push(
-      () =>
-        new Promise<void>((resolve) => {
-          wss.close(() => resolve());
-        }),
-    );
+    const wss = websocketServer();
     const { transport, reserved } = fixture({
       handleUpgrade: async (req, socket, head) => {
         wss.handleUpgrade(req, socket, head, (ws) => ws.close());
       },
     });
-    const { socket, completion } = await transport.openWebSocket({
-      pathAndQuery: "/claw",
-      origin: "https://ui.example.test",
-      protocols: [],
-      signal: new AbortController().signal,
-    });
+    const { socket, completion } = await transport.openWebSocket(websocketRequest);
     await socket.closed;
     await completion;
     expect(reserved()).toBe(0);

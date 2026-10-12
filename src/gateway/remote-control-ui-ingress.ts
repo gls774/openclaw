@@ -12,12 +12,12 @@ import {
 import { validateRemoteControlUiFrameAncestors } from "./control-ui-csp.js";
 import { filterRemoteControlUiPluginReadCookies } from "./control-ui-plugin-auth-cookie.js";
 import { isOperatorScope } from "./operator-scopes.js";
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
 import { resolveRemoteControlUiHttpRoute } from "./remote-control-ui-http-routing.js";
 import type { GatewayControlUiIngressHost } from "./remote-control-ui-ingress-host.js";
 import { createRemoteControlUiTransport } from "./remote-control-ui-transport.js";
 import { prepareRemoteIngressPrincipal } from "./remote-ingress-principal.js";
 import { requestRemoteIngressGateway } from "./remote-ingress-request.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
 const MAX_HANDLES_PER_PLUGIN = 32;
 const MAX_HTTP_PER_HANDLE = 16;
@@ -267,9 +267,7 @@ export function createGatewayControlUiIngressFactory(params: {
     const authority = preparedAuthority;
     const signal = authority.signal;
     const resolvePrincipal = () => authority.resolve();
-    const assertCurrent = () => {
-      authority.resolve().assertCurrent();
-    };
+    const assertCurrent = authority.assertCurrent;
     const handles = new Set<GatewayControlUiIngressV2>();
     const work = new Set<Promise<unknown>>();
     const trackWork = <T>(promise: Promise<T>): Promise<T> => {
@@ -308,13 +306,11 @@ export function createGatewayControlUiIngressFactory(params: {
       requestOptions?: { signal?: AbortSignal },
       ingressContext?: RemoteControlUiIngressContext,
     ): Promise<T> => {
-      assertCurrent();
       return trackWork(
         requestRemoteIngressGateway<T>({
           host,
           pluginId,
           resolvePrincipal,
-          assertCurrent,
           signal,
           trackWork,
           method,
@@ -332,7 +328,7 @@ export function createGatewayControlUiIngressFactory(params: {
           principal,
           operatorScopeCeiling,
           resolvePrincipal,
-          audienceId: optionsAudienceId,
+          audienceId: options.audienceId,
           signal,
           assertCurrent,
           requestGateway,
@@ -355,7 +351,6 @@ export function createGatewayControlUiIngressFactory(params: {
       },
       close,
     };
-    const optionsAudienceId = options.audienceId;
     if (signal.aborted) {
       await close();
       assertCurrent();
@@ -669,7 +664,6 @@ export function createGatewayControlUiIngressFactory(params: {
     capabilityVersion: 2,
     bindPrincipal,
     async open(options) {
-      validatePresentation(options);
       const binding = await bindPrincipal(options);
       try {
         const handle = await binding.openControlUi(options);

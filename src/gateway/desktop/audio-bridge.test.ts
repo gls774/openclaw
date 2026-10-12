@@ -6,8 +6,8 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import type { ProcessSupervisor, SpawnInput } from "../../process/supervisor/types.js";
 import { markGatewayIngressTransport } from "../ingress-attribution.js";
-import type { RemoteControlUiIngressContext } from "../remote-control-ui-context.js";
 import { createRemoteControlUiIngressTestContext } from "../remote-control-ui.test-support.js";
+import type { RemoteControlUiIngressContext } from "../server/client-identity-types.js";
 import { createManagedLinuxAudio, type DesktopAudioSource } from "./managed-linux-audio.js";
 
 const peers = vi.hoisted(() => ({ next: undefined as unknown }));

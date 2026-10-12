@@ -3,8 +3,6 @@ import type { PluginRuntimeCapabilityLease } from "./capability-lease.js";
 import {
   GatewayControlUiIngressError,
   type GatewayControlUiIngressFactoryV2,
-  type GatewayIngressPrincipalBindingV1,
-  type GatewayControlUiIngressV2,
 } from "./gateway-ingress.types.js";
 import { getPluginInstance } from "./plugin-instance-scope.js";
 import { isPluginRecordActive } from "./registry-lifecycle.js";
@@ -75,58 +73,46 @@ export function createPluginServiceControlUiIngress(options: {
     return stopping;
   };
   lease.retain(() => void stop());
-  return {
-    stop,
-    factory: (() => {
-      const track = <T extends { close(): Promise<void> }>(operation: Promise<T>): Promise<T> => {
-        opening.add(operation);
-        void operation.finally(() => opening.delete(operation)).catch(() => {});
-        return operation;
-      };
-      const hostFactory = async () => {
-        assertCurrent();
-        const { createGatewayControlUiIngressFactory } =
-          await import("../gateway/remote-control-ui-ingress.js");
-        assertCurrent();
-        return createGatewayControlUiIngressFactory({
+  const openHandle = <T extends { close(): Promise<void> }>(
+    open: (factory: GatewayControlUiIngressFactoryV2) => Promise<T>,
+  ): Promise<T> => {
+    const operation = (async () => {
+      const { createGatewayControlUiIngressFactory } =
+        await import("../gateway/remote-control-ui-ingress.js");
+      const handle = await open(
+        createGatewayControlUiIngressFactory({
           pluginId: record.id,
           signal,
           assertCurrent,
           host,
-        });
-      };
-      const retain = async <T extends { close(): Promise<void> }>(handle: T): Promise<T> => {
-        try {
-          assertCurrent();
-        } catch (error) {
+        }),
+      );
+      try {
+        assertCurrent();
+      } catch (error) {
+        await handle.close();
+        throw error;
+      }
+      const owned = {
+        ...handle,
+        async close() {
           await handle.close();
-          throw error;
-        }
-        const owned = {
-          ...handle,
-          async close() {
-            await handle.close();
-            handles.delete(owned);
-          },
-        };
-        handles.add(owned);
-        return owned;
-      };
-      return {
-        capabilityVersion: 2,
-        open(input) {
-          return track(
-            (async (): Promise<GatewayControlUiIngressV2> =>
-              retain(await (await hostFactory()).open(input)))(),
-          );
-        },
-        bindPrincipal(input) {
-          return track(
-            (async (): Promise<GatewayIngressPrincipalBindingV1> =>
-              retain(await (await hostFactory()).bindPrincipal(input)))(),
-          );
+          handles.delete(owned);
         },
       };
-    })(),
+      handles.add(owned);
+      return owned;
+    })();
+    opening.add(operation);
+    void operation.finally(() => opening.delete(operation)).catch(() => {});
+    return operation;
+  };
+  return {
+    stop,
+    factory: {
+      capabilityVersion: 2,
+      open: (input) => openHandle((factory) => factory.open(input)),
+      bindPrincipal: (input) => openHandle((factory) => factory.bindPrincipal(input)),
+    },
   };
 }

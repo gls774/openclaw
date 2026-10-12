@@ -42,10 +42,7 @@ import {
   setClientPluginNodeCapability,
   type PluginNodeCapabilitySurface,
 } from "../../plugin-node-capability.js";
-import {
-  assertRemoteControlUiIngressCurrent,
-  getRemoteControlUiIngressContext,
-} from "../../remote-control-ui-context.js";
+import { getRemoteControlUiIngressContext } from "../../remote-control-ui-context.js";
 import { formatForLog, logWs } from "../../ws-log.js";
 import { truncateCloseReason } from "../close-reason.js";
 import type { GatewayWsClient } from "../ws-types.js";
@@ -84,11 +81,6 @@ export async function attachAuthenticatedGatewayConnect(
   context: GatewayConnectPhaseContext,
   state: DeviceAuthorizedGatewayConnect,
 ): Promise<void> {
-  const assertIngressCurrent = () =>
-    assertRemoteControlUiIngressCurrent(
-      getRemoteControlUiIngressContext(context.handler.upgradeReq),
-    );
-  assertIngressCurrent();
   const {
     socket,
     connId,
@@ -139,7 +131,6 @@ export async function attachAuthenticatedGatewayConnect(
   if (!(await prepareGatewayNodeConnect(context, state))) {
     return;
   }
-  assertIngressCurrent();
 
   const rejectNodePairing = async (message: string, metadata: { deviceId?: string } = {}) => {
     markHandshakeFailure("node-pairing-generation-changed", metadata);
@@ -223,7 +214,6 @@ export async function attachAuthenticatedGatewayConnect(
         resolveAuthenticatedGitHubIdentity,
         assertCurrent: profileLifecycle.assertCurrent,
       });
-  assertIngressCurrent();
   if (!profileAdmission.ok) {
     return;
   }
@@ -394,7 +384,6 @@ export async function attachAuthenticatedGatewayConnect(
   };
   if (authenticatedOperator) {
     const source = await prepareGatewayConnectOperatorDeviceSource(context, state, deviceScopes);
-    assertIngressCurrent();
     if (source === undefined) {
       return;
     }
@@ -563,7 +552,6 @@ export async function attachAuthenticatedGatewayConnect(
     });
     return;
   }
-  assertRemoteControlUiIngressCurrent(nextClient.remoteControlUiIngress);
   profileLifecycle.bind(nextClient);
   if (!bindGatewayConnectOperatorAccess(context, nextClient)) {
     return;
@@ -723,7 +711,6 @@ export async function attachAuthenticatedGatewayConnect(
   }
 
   await sendGatewayHello(context, state, pluginSurfaceUrls, authenticatedUserProfile?.profileId);
-  assertIngressCurrent();
 
   scheduleGatewayConnectProfileSync({
     context,

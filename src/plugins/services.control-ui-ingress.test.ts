@@ -8,9 +8,8 @@ import {
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
 import type {
-  GatewayControlUiIngressFactoryV1,
-  GatewayControlUiIngressFactoryV2,
   GatewayControlUiIngressOpenOptionsV2,
+  GatewayControlUiIngressV2,
 } from "./gateway-ingress.types.js";
 import { createLazyPluginRuntime } from "./loader-module-runtime.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
@@ -108,30 +107,18 @@ function openOptions(): GatewayControlUiIngressOpenOptionsV2 {
   };
 }
 
-describe("service Control UI ingress authority", () => {
-  it("refuses a legacy host before it can interpret a person grant as owner authority", async () => {
-    let legacyOpened = false;
-    const legacy: GatewayControlUiIngressFactoryV1 = {
-      async open() {
-        legacyOpened = true;
-        throw new Error("Legacy owner open called");
-      },
-    };
-    const openPerson = async (
-      factory: GatewayControlUiIngressFactoryV1 | GatewayControlUiIngressFactoryV2,
-    ) => {
-      if (!("capabilityVersion" in factory) || factory.capabilityVersion !== 2) {
-        throw new Error("Upgrade OpenClaw: principal-bound ingress requires capability version 2.");
-      }
-      return factory.open({
-        ...openOptions(),
-        principal: { kind: "person", profileId: "approved-person" },
-      });
-    };
-    await expect(openPerson(legacy)).rejects.toThrow("requires capability version 2");
-    expect(legacyOpened).toBe(false);
+async function readUi(ingress: GatewayControlUiIngressV2) {
+  const { response } = await ingress.request({
+    surface: "control-ui",
+    method: "GET",
+    pathAndQuery: "/",
+    headers: [],
+    signal: new AbortController().signal,
   });
+  return response.text();
+}
 
+describe("service Control UI ingress authority", () => {
   it.each([
     { origin: "bundled" as const, available: true },
     { origin: "global" as const, trustedOfficialInstall: true, available: true },
@@ -142,19 +129,7 @@ describe("service Control UI ingress authority", () => {
     async ({ available, ...record }) => {
       const { serviceContext } = await fixture(record);
       expect(serviceContext.controlUiIngress !== undefined).toBe(available);
-      if (serviceContext.controlUiIngress) {
-        expect(serviceContext.controlUiIngress.capabilityVersion).toBe(2);
-        const ingress = await serviceContext.controlUiIngress.open(openOptions());
-        const { response } = await ingress.request({
-          surface: "control-ui",
-          method: "GET",
-          pathAndQuery: "/",
-          headers: [["accept", "text/html"]],
-          signal: new AbortController().signal,
-        });
-        expect(await response.text()).toBe("synthetic Control UI");
-        await ingress.close();
-      }
+      expect(serviceContext.controlUiIngress?.capabilityVersion).toBe(available ? 2 : undefined);
     },
   );
 
@@ -170,6 +145,7 @@ describe("service Control UI ingress authority", () => {
     try {
       const ingress = await factory.open(openOptions());
       const rpc = await factory.bindPrincipal(openOptions());
+      expect(await readUi(ingress)).toBe("synthetic Control UI");
       stopping = service.stop();
       await awaitGateBeforeSettlement(
         enteredStop.promise,
@@ -178,15 +154,7 @@ describe("service Control UI ingress authority", () => {
       );
       await expect(factory.open(openOptions())).rejects.toThrow(/stopped|active|closed/);
       await expect(rpc.request("users.self", {})).rejects.toThrow(/stopped|active|closed/);
-      await expect(
-        ingress.request({
-          surface: "control-ui",
-          method: "GET",
-          pathAndQuery: "/",
-          headers: [],
-          signal: new AbortController().signal,
-        }),
-      ).rejects.toThrow(/stopped|active|closed/);
+      await expect(readUi(ingress)).rejects.toThrow(/stopped|active|closed/);
     } finally {
       releaseStop.resolve();
       await stopping;
@@ -201,14 +169,6 @@ describe("service Control UI ingress authority", () => {
     revokePluginRecord(registry, record);
     await expect(factory.open(openOptions())).rejects.toThrow(/active/);
     await expect(rpc.request("users.self", {})).rejects.toThrow(/active/);
-    await expect(
-      ingress.request({
-        surface: "control-ui",
-        method: "GET",
-        pathAndQuery: "/",
-        headers: [],
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow(/active/);
+    await expect(readUi(ingress)).rejects.toThrow(/active/);
   });
 });

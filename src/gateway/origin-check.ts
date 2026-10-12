@@ -17,9 +17,11 @@ import {
 import {
   getRemoteControlUiIngressContext,
   hasCurrentRemoteControlUiIngress,
-  type RemoteControlUiIngressContext,
 } from "./remote-control-ui-context.js";
-import type { GatewayWsBrowserOrigin } from "./server/client-identity-types.js";
+import type {
+  GatewayWsBrowserOrigin,
+  RemoteControlUiIngressContext,
+} from "./server/client-identity-types.js";
 
 export function checkGatewayWsBrowserOrigin(origin: GatewayWsBrowserOrigin, cfg: OpenClawConfig) {
   return checkBrowserOrigin({

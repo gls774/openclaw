@@ -34,7 +34,6 @@ import {
 } from "./ingress-attribution.js";
 import { normalizePluginNodeCapabilityScopedUrl } from "./plugin-node-capability.js";
 import {
-  assertRemoteControlUiGatewayAuth,
   assertRemoteControlUiIngressCurrent,
   getRemoteControlUiIngressContext,
 } from "./remote-control-ui-context.js";
@@ -155,7 +154,9 @@ function handleBudgetedGatewayWebSocketUpgrade(params: {
   }
 }
 
-export type GatewayUpgradeHandlerOptions = {
+/** Physical and virtual transports share upgrade admission and route ownership. */
+export function attachGatewayUpgradeHandler(opts: {
+  httpServer: HttpServer;
   wss: WebSocketServer;
   handlePluginUpgrade?: PluginHttpUpgradeHandler;
   shouldEnforcePluginGatewayAuth?: (pathContext: PluginRoutePathContext) => boolean;
@@ -179,10 +180,7 @@ export type GatewayUpgradeHandlerOptions = {
   ingressTransport?: GatewayIngressTransport;
   reportUnattributableProxy?: GatewayUnattributableProxyReporter;
   controlUiBasePath?: string;
-};
-
-/** Physical and virtual transports share upgrade admission and route ownership. */
-function createGatewayUpgradeHandler(opts: GatewayUpgradeHandlerOptions) {
+}) {
   const {
     wss,
     handlePluginUpgrade,
@@ -197,7 +195,7 @@ function createGatewayUpgradeHandler(opts: GatewayUpgradeHandlerOptions) {
     log,
   } = opts;
   const getResolvedAuth = opts.getResolvedAuth ?? (() => resolvedAuth);
-  return async (req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
+  const handle = async (req: IncomingMessage, socket: Duplex, head: Buffer): Promise<void> => {
     // Node releases socket errors before routing can await a plugin or authenticate.
     socket.once("error", () => socket.destroy());
     const remoteIngress = getRemoteControlUiIngressContext(req);
@@ -206,7 +204,7 @@ function createGatewayUpgradeHandler(opts: GatewayUpgradeHandlerOptions) {
     }
     const handleUpgrade = async () => {
       const configSnapshot = getRuntimeConfig();
-      assertRemoteControlUiGatewayAuth(remoteIngress, getResolvedAuth(), configSnapshot);
+      assertRemoteControlUiIngressCurrent(remoteIngress);
       if (remoteIngress) {
         const path = URL.parse(req.url ?? "/", remoteIngress.publicOrigin)?.pathname;
         const basePath = opts.controlUiBasePath ?? "";
@@ -462,13 +460,6 @@ function createGatewayUpgradeHandler(opts: GatewayUpgradeHandlerOptions) {
       rejectWebSocketUpgrade(socket, { status: 503 });
     });
   };
-}
-
-/** Attaches the shared upgrade owner to a physical HTTP listener. */
-export function attachGatewayUpgradeHandler(
-  opts: GatewayUpgradeHandlerOptions & { httpServer: HttpServer },
-) {
-  const handle = createGatewayUpgradeHandler(opts);
   opts.httpServer.on("upgrade", (req, socket, head) => {
     void handle(req, socket, head);
   });

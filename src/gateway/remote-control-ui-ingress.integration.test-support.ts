@@ -54,7 +54,7 @@ export type Peer = {
   close(): Promise<void>;
 };
 
-export type ConnectOptions = {
+type ConnectOptions = {
   identity?: DeviceIdentity;
   auth?: { token?: string; password?: string; deviceToken?: string; bootstrapToken?: string };
   scopes?: string[];

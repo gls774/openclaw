@@ -81,7 +81,6 @@ type PairingApprovalPlanParams = {
   scopes: string[];
   hasRequestedScopes: boolean;
   connectionScopeCap: (scopes: string[]) => string[];
-  remoteIngressScopeCeiling?: readonly string[];
 };
 
 /** Reused at planning and synchronous approval commit so config changes revoke the same policy. */
@@ -167,7 +166,7 @@ export async function resolvePairingApprovalPlan(
   const isSameKeyScopeUpgrade =
     reason === "scope-upgrade" && existingPairedDevice?.publicKey === params.devicePublicKey;
   const operatorApprovalKind =
-    authMethod === "remote-ingress" && params.remoteIngressScopeCeiling
+    authMethod === "remote-ingress" && state.remoteIngressPrincipal
       ? "remote-ingress"
       : authMethod === "trusted-proxy" &&
           (isBrowserOperatorUi || isWebchat || isNativeAppUi) &&

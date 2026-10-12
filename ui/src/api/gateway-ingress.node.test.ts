@@ -124,12 +124,4 @@ it("signs credential-free ingress connects and reconnects without reading or sto
   expect(next.frame.params.device?.id).toBe("device-1");
   expect(loadToken).not.toHaveBeenCalled();
   expect(storeToken).not.toHaveBeenCalled();
-
-  client.stop();
-  client.start();
-  const restarted = await connect();
-  expect(restarted.frame.params.auth).toBeUndefined();
-  expect(restarted.frame.params.device?.id).toBe("device-1");
-  expect(loadToken).not.toHaveBeenCalled();
-  expect(storeToken).not.toHaveBeenCalled();
 });

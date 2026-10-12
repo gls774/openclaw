@@ -1,7 +1,7 @@
 import { getRuntimeConfig } from "../config/io.js";
 import { GatewayControlUiIngressError } from "../plugins/gateway-ingress.types.js";
 import { authorizeOperatorScopesForMethod } from "./method-scopes.js";
-import type { RemoteIngressPrincipalSnapshot } from "./remote-ingress-principal.js";
+import type { RemoteIngressPrincipalSnapshot } from "./server/client-identity-types.js";
 import { prepareSessionCreatorProfile } from "./session-creator.js";
 import { resolveRequestedSessionAgentId } from "./session-request-agent.js";
 import { createProfileSessionEntryFilter } from "./session-sharing-read.js";

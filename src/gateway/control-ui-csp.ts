@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { ServerResponse } from "node:http";
-import type { RemoteControlUiIngressContext } from "./remote-control-ui-context.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
 /** The contextual host policy admits explicit secure origins and the supported embedding scheme. */
 export function validateRemoteControlUiFrameAncestors(

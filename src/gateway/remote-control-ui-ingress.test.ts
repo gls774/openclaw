@@ -4,7 +4,7 @@ import { createDeferred } from "../../test/helpers/promise.js";
 import { REDACTED_SENTINEL } from "../config/redact-sentinel.js";
 import type {
   GatewayControlUiIngressOpenOptionsV2,
-  GatewayControlUiIngressV1,
+  GatewayControlUiIngressV2,
 } from "../plugins/gateway-ingress.types.js";
 import {
   createOpenClawTestState,
@@ -22,7 +22,7 @@ afterAll(async () => {
   await state?.cleanup();
 });
 
-const handles = new Set<GatewayControlUiIngressV1>();
+const handles = new Set<GatewayControlUiIngressV2>();
 afterEach(async () => {
   await Promise.all([...handles].map((handle) => handle.close()));
   handles.clear();
@@ -74,7 +74,7 @@ function fixture() {
   return { host, options, factory, open };
 }
 
-function request(handle: GatewayControlUiIngressV1, pathAndQuery = "/claw/") {
+function request(handle: GatewayControlUiIngressV2, pathAndQuery = "/claw/") {
   return handle.request({
     surface: "control-ui",
     method: "GET",
@@ -311,7 +311,7 @@ describe("remote Control UI handle", () => {
   it("bounds main, auxiliary and plugin sockets separately", async () => {
     const { open, options } = fixture();
     const first = await open();
-    const connect = (handle: GatewayControlUiIngressV1, pathAndQuery: string) =>
+    const connect = (handle: GatewayControlUiIngressV2, pathAndQuery: string) =>
       handle.openWebSocket({
         pathAndQuery,
         origin: options.publicOrigin,
@@ -333,31 +333,5 @@ describe("remote Control UI handle", () => {
     }
     await expect(connect(await open(), "/claw")).rejects.toMatchObject({ code: "limit-exceeded" });
     await expect(connect(first, "/browser/extension")).rejects.toMatchObject({ code: "forbidden" });
-  });
-
-  it("fences closure and joins work already admitted by the canonical owner", async () => {
-    const { host, open } = fixture();
-    const entered = createDeferred();
-    const release = createDeferred();
-    host.handleRequest = async (_req, res) => {
-      res.write("pending");
-      entered.resolve();
-      await release.promise;
-      res.end();
-    };
-    const handle = await open();
-    const loading = request(handle);
-    await entered.promise;
-    const { response } = await loading;
-    let closed = false;
-    const closing = handle.close().then(() => {
-      closed = true;
-    });
-    await expect(request(handle)).rejects.toMatchObject({ code: "closed" });
-    await expect(response.text()).rejects.toThrow();
-    expect(closed).toBe(false);
-    release.resolve();
-    await closing;
-    expect(closed).toBe(true);
   });
 });

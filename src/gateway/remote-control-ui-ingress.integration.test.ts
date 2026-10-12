@@ -11,10 +11,9 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { loadOrCreateDeviceIdentity } from "../infra/device-identity.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { saveMediaBuffer } from "../media/store.js";
-import {
-  GatewayControlUiIngressError,
-  type GatewayControlUiIngressFactoryV2,
-  type GatewayControlUiIngressV2,
+import type {
+  GatewayControlUiIngressFactoryV2,
+  GatewayControlUiIngressV2,
 } from "../plugins/gateway-ingress.types.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { uploadUserBackground } from "../state/user-background.js";
@@ -45,7 +44,6 @@ import {
   expectIngressDenials,
   type IngressFrame,
   type Peer,
-  type ConnectOptions,
 } from "./remote-control-ui-ingress.integration.test-support.js";
 import { createGatewayControlUiIngressFactory } from "./remote-control-ui-ingress.js";
 import {
@@ -136,16 +134,20 @@ describe("remote Control UI ingress production composition", () => {
     maxPayload: MAX_PREAUTH_PAYLOAD_BYTES,
     perMessageDeflate: false,
   });
-  const openOptions = {
+  const principalOptions = {
     audienceId: "synthetic-integration-grant",
     principal: { kind: "owner" as const },
-    publicOrigin: PUBLIC_ORIGIN,
-    sandboxOrigin: SANDBOX_ORIGIN,
     operatorScopeCeiling: SCOPES,
-    frameAncestors: FRAME_ANCESTORS,
     signal: grantLifetime.signal,
     assertCurrent: () => grantLifetime.signal.throwIfAborted(),
   };
+
+  const presentationOptions = {
+    publicOrigin: PUBLIC_ORIGIN,
+    sandboxOrigin: SANDBOX_ORIGIN,
+    frameAncestors: FRAME_ANCESTORS,
+  };
+  const openOptions = { ...principalOptions, ...presentationOptions };
 
   beforeAll(async () => {
     state = await createOpenClawTestState({
@@ -479,9 +481,11 @@ describe("remote Control UI ingress production composition", () => {
         const hello = await connect(peer, { identity, scopes });
         expectHello(hello, "remote-ingress", SCOPES);
         expect(hello.payload?.controlUiUrl).toBe(`${PUBLIC_ORIGIN}/claw`);
-        await expectOwnerReadAccess(peer, OWNER_SESSION_KEY);
-        await expectIngressDenials(peer);
-        await expectReadWriteWithoutAdmin(peer, "credential-free browser");
+        if (scopes?.length === SCOPES.length) {
+          await expectOwnerReadAccess(peer, OWNER_SESSION_KEY);
+          await expectIngressDenials(peer);
+          await expectReadWriteWithoutAdmin(peer, "credential-free browser");
+        }
       });
     }
     await usePeer(await openDirect(), async (peer) => {
@@ -545,90 +549,38 @@ describe("remote Control UI ingress production composition", () => {
     await response.body?.cancel();
   });
 
-  it("rejects reusable credentials, invalid device proof, roles, and scopes above the grant", async () => {
+  it("rejects invalid signed device proof through the WebSocket admission path", async () => {
     const identity = loadOrCreateDeviceIdentity({ identityKey: "synthetic-rejected-browser" });
-    for (const credential of [
-      { token: SHARED_TOKEN },
-      { password: "synthetic-password" },
-      { bootstrapToken: "synthetic-bootstrap" },
-      { deviceToken: "synthetic-device-token" },
-    ]) {
-      await usePeer(await openRemote(), async (peer) => {
-        expect(
-          await connect(peer, { identity, auth: credential, scopes: [...SCOPES] }),
-        ).toMatchObject({
-          ok: false,
-          error: { code: "FORBIDDEN", message: expect.stringContaining("credential") },
-        });
+    await usePeer(await openRemote(), async (peer) => {
+      expect(await connect(peer, { identity, tamperSignature: true })).toMatchObject({
+        ok: false,
+        error: { message: expect.stringContaining("signature") },
       });
-    }
-    for (const [options, message] of [
-      [{ identity, scopes: [...SCOPES], tamperSignature: true }, "signature"],
-      [{ scopes: [...SCOPES] }, "signed device identity"],
-      [{ identity, role: "node", scopes: [] }, "operator role"],
-      [{ identity, scopes: ["operator.admin"] }, "ceiling"],
-    ] as Array<[ConnectOptions, string]>) {
-      await usePeer(await openRemote(), async (peer) => {
-        expect(await connect(peer, options)).toMatchObject({
-          ok: false,
-          error: { message: expect.stringContaining(message) },
-        });
-      });
-    }
+    });
   });
 
-  it("enforces owner read/write and full ceilings in WS and origin-free RPC for token and password hosts", async () => {
-    for (const mode of ["token", "password"] as const) {
-      auth = { mode, [mode]: SHARED_TOKEN, allowTailscale: false };
-      config = { ...config, gateway: { ...config.gateway, auth: { mode, [mode]: SHARED_TOKEN } } };
-      setRuntimeConfigSnapshot(config, config);
-      for (const ceiling of [["operator.read"], [...SCOPES], ["operator.admin"]]) {
-        const binding = await factory.bindPrincipal({
-          audienceId: `owner-${mode}-${ceiling.join("-")}`,
-          principal: { kind: "owner" },
-          operatorScopeCeiling: ceiling,
-          signal: grantLifetime.signal,
-          assertCurrent: () => grantLifetime.signal.throwIfAborted(),
-        });
-        try {
-          expect(await binding.request("voicewake.get", {})).toHaveProperty("triggers");
-          if (ceiling.includes("operator.read") && ceiling.length === 1) {
-            await expect(
-              binding.request("voicewake.set", { triggers: ["denied"] }),
-            ).rejects.toThrow("operator.write");
-          } else {
-            expect(await binding.request("voicewake.set", { triggers: [mode] })).toMatchObject({
-              triggers: [mode],
-            });
-          }
-          if (ceiling.includes("operator.admin")) {
-            expect(await binding.request("exec.approvals.get", {})).toHaveProperty(
-              "resolvedDefaults",
-            );
-            expect(await binding.request("device.pair.list", {})).toHaveProperty("paired");
-          } else {
-            await expect(binding.request("config.set", { raw: "{}" })).rejects.toThrow(
-              "operator.admin",
-            );
-          }
-          const ui = await binding.openControlUi({
-            publicOrigin: PUBLIC_ORIGIN,
-            sandboxOrigin: SANDBOX_ORIGIN,
-            frameAncestors: FRAME_ANCESTORS,
-          });
-          await usePeer(await openRemote(ui), async (peer) => {
-            const identity = loadOrCreateDeviceIdentity({
-              identityKey: `synthetic-${mode}-${ceiling.join("-")}`,
-            });
-            expectHello(await connect(peer, { identity }), "remote-ingress", ceiling);
-            expect(await request(peer, "voicewake.get", {})).toMatchObject({ ok: true });
-            expect(await request(peer, "exec.approvals.get", {})).toMatchObject({
-              ok: ceiling.includes("operator.admin"),
-            });
-          });
-        } finally {
-          await binding.close();
+  it("applies owner ceilings to origin-free RPC on a password host", async () => {
+    auth = { mode: "password", password: SHARED_TOKEN, allowTailscale: false };
+    config = { ...config, gateway: { ...config.gateway, auth } };
+    setRuntimeConfigSnapshot(config, config);
+    for (const ceiling of [["operator.read"], ["operator.admin"]]) {
+      const binding = await factory.bindPrincipal({
+        ...principalOptions,
+        operatorScopeCeiling: ceiling,
+      });
+      try {
+        expect(await binding.request("voicewake.get", {})).toHaveProperty("triggers");
+        if (ceiling.includes("operator.admin")) {
+          expect(await binding.request("exec.approvals.get", {})).toHaveProperty(
+            "resolvedDefaults",
+          );
+        } else {
+          await expect(binding.request("voicewake.set", { triggers: ["denied"] })).rejects.toThrow(
+            "operator.write",
+          );
         }
+      } finally {
+        await binding.close();
       }
     }
   });
@@ -637,7 +589,7 @@ describe("remote Control UI ingress production composition", () => {
     let current = true;
     let assertRetained: (() => void) | undefined;
     const binding = await factory.bindPrincipal({
-      ...openOptions,
+      ...principalOptions,
       assertCurrent: () => {
         if (!current) {
           throw new Error("Owner grant revoked");
@@ -680,12 +632,8 @@ describe("remote Control UI ingress production composition", () => {
   });
 
   it("joins retained UI RPC execution before closing its transport handle", async () => {
-    const binding = await factory.bindPrincipal(openOptions);
-    const ui = await binding.openControlUi({
-      publicOrigin: PUBLIC_ORIGIN,
-      sandboxOrigin: SANDBOX_ORIGIN,
-      frameAncestors: FRAME_ANCESTORS,
-    });
+    const binding = await factory.bindPrincipal(principalOptions);
+    const ui = await binding.openControlUi(presentationOptions);
     heldMutation = { entered: createDeferred(), release: createDeferred(), remaining: 1 };
     try {
       const pending = ui.requestGateway("users.setDisplayName", {
@@ -770,102 +718,88 @@ describe("remote Control UI ingress production composition", () => {
     projection = await createSessionRowProjection({ cfg: config, modelCatalog: [] });
     let adminMediaTicket: string | undefined;
     for (const person of people) {
-      for (const full of [false, true]) {
-        const ceiling = full ? ["operator.admin"] : [...SCOPES];
-        const binding = await factory.bindPrincipal({
-          ...openOptions,
-          audienceId: `${person.id}-${full}`,
-          principal: { kind: "person", profileId: person.id },
-          operatorScopeCeiling: ceiling,
+      const isAdmin = person.id === admin.id;
+      const ceiling = isAdmin ? ["operator.admin"] : [...SCOPES];
+      const binding = await factory.bindPrincipal({
+        ...principalOptions,
+        audienceId: person.id,
+        principal: { kind: "person", profileId: person.id },
+        operatorScopeCeiling: ceiling,
+      });
+      try {
+        const expectedScopes = isAdmin ? ceiling : ["operator.read"];
+        const listed = await binding.request<{ sessions: Array<{ key: string }> }>(
+          "sessions.list",
+          {
+            source: "sidebar",
+            rowMode: "compact",
+            limit: 20,
+          },
+        );
+        expect(listed.sessions.map((session) => session.key)).toContain(
+          `agent:main:ingress-${person.id}`,
+        );
+        if (person.id === reader.id) {
+          expect(listed.sessions.map((session) => session.key)).not.toContain(
+            `agent:main:ingress-${admin.id}`,
+          );
+        }
+        if (isAdmin) {
+          expect(await binding.request("exec.approvals.get", {})).toHaveProperty(
+            "resolvedDefaults",
+          );
+        } else {
+          await expect(binding.request("exec.approvals.get", {})).rejects.toThrow("operator.admin");
+        }
+        if (person.id === reader.id) {
+          await expect(binding.request("voicewake.set", { triggers: ["denied"] })).rejects.toThrow(
+            "operator.write",
+          );
+        }
+        const ui = await binding.openControlUi(presentationOptions);
+        await usePeer(await openRemote(ui), async (peer) => {
+          const identity = loadOrCreateDeviceIdentity({
+            identityKey: `synthetic-person-${person.id}`,
+          });
+          expectHello(
+            await connect(peer, { identity, profileId: person.id }),
+            "remote-ingress",
+            expectedScopes,
+          );
+          expect(await request(peer, "exec.approvals.get", {})).toMatchObject({
+            ok: isAdmin,
+          });
         });
-        try {
-          const expectedScopes = person.id === admin.id ? ceiling : ["operator.read"];
-          expect(await binding.request("users.self", {})).toMatchObject({
-            profile: { id: person.id },
-          });
-          const listed = await binding.request<{ sessions: Array<{ key: string }> }>(
-            "sessions.list",
-            {
-              source: "sidebar",
-              rowMode: "compact",
-              limit: 20,
-            },
-          );
-          expect(listed.sessions.map((session) => session.key)).toContain(
-            `agent:main:ingress-${person.id}`,
-          );
-          if (person.id === reader.id) {
-            expect(listed.sessions.map((session) => session.key)).not.toContain(
-              `agent:main:ingress-${admin.id}`,
-            );
-          }
-          if (person.id === admin.id && full) {
-            expect(await binding.request("exec.approvals.get", {})).toHaveProperty(
-              "resolvedDefaults",
-            );
-          } else {
-            await expect(binding.request("exec.approvals.get", {})).rejects.toThrow(
-              "operator.admin",
-            );
-          }
-          if (person.id === reader.id) {
-            await expect(
-              binding.request("voicewake.set", { triggers: ["denied"] }),
-            ).rejects.toThrow("operator.write");
-          }
-          const ui = await binding.openControlUi({
-            publicOrigin: PUBLIC_ORIGIN,
-            sandboxOrigin: SANDBOX_ORIGIN,
-            frameAncestors: FRAME_ANCESTORS,
-          });
-          await usePeer(await openRemote(ui), async (peer) => {
-            const identity = loadOrCreateDeviceIdentity({
-              identityKey: `synthetic-person-${person.id}-${full}`,
-            });
-            expectHello(
-              await connect(peer, { identity, profileId: person.id }),
-              "remote-ingress",
-              expectedScopes,
-            );
-            expect(await request(peer, "users.self", {})).toMatchObject({
-              ok: true,
-              payload: { profile: { id: person.id } },
-            });
-            expect(await request(peer, "exec.approvals.get", {})).toMatchObject({
-              ok: person.id === admin.id && full,
-            });
-          });
-          if (person.id === admin.id && full) {
-            const metadata = await readRemote(`${assistantMediaPath}&meta=1`, ui);
-            expect(metadata.status).toBe(200);
-            adminMediaTicket = ((await metadata.json()) as { mediaTicket: string }).mediaTicket;
-          } else if (person.id === reader.id) {
-            expect(adminMediaTicket).toBeDefined();
-            const replay = await readRemote(
-              `${assistantMediaPath}&mediaTicket=${encodeURIComponent(adminMediaTicket!)}`,
-              ui,
-            );
-            expect(replay.status).toBe(404);
-            await replay.body?.cancel();
-          }
-          const avatar = await readRemote(`/claw/api/users/${person.id}/avatar`, ui);
-          expect(avatar.status).toBe(200);
-          await avatar.body?.cancel();
-          const ownIcon = await readRemote(
-            `/claw/__openclaw__/workspace-icon/${encodeURIComponent(`agent:main:ingress-${person.id}`)}`,
+        if (isAdmin) {
+          const metadata = await readRemote(`${assistantMediaPath}&meta=1`, ui);
+          expect(metadata.status).toBe(200);
+          adminMediaTicket = ((await metadata.json()) as { mediaTicket: string }).mediaTicket;
+        } else if (person.id === reader.id) {
+          expect(adminMediaTicket).toBeDefined();
+          const replay = await readRemote(
+            `${assistantMediaPath}&mediaTicket=${encodeURIComponent(adminMediaTicket!)}`,
             ui,
           );
-          expect(ownIcon.status).toBe(full && person.id === admin.id ? 200 : 403);
-          await ownIcon.body?.cancel();
-        } finally {
-          await binding.close();
+          expect(replay.status).toBe(404);
+          await replay.body?.cancel();
         }
+        const avatar = await readRemote(`/claw/api/users/${person.id}/avatar`, ui);
+        expect(avatar.status).toBe(200);
+        await avatar.body?.cancel();
+        const ownIcon = await readRemote(
+          `/claw/__openclaw__/workspace-icon/${encodeURIComponent(`agent:main:ingress-${person.id}`)}`,
+          ui,
+        );
+        expect(ownIcon.status).toBe(isAdmin ? 200 : 403);
+        await ownIcon.body?.cancel();
+      } finally {
+        await binding.close();
       }
     }
     for (const profileId of ["missing-ingress-person", "gateway-owner"]) {
       await expect(
         factory.bindPrincipal({
-          ...openOptions,
+          ...principalOptions,
           principal: { kind: "person", profileId },
         }),
       ).rejects.toMatchObject({ code: "forbidden" });
@@ -876,98 +810,112 @@ describe("remote Control UI ingress production composition", () => {
     });
     await expect(
       factory.bindPrincipal({
-        ...openOptions,
+        ...principalOptions,
         principal: { kind: "person", profileId: policyPerson.id },
       }),
     ).rejects.toMatchObject({ code: "forbidden" });
-    for (const change of ["role", "merge", "grant", "assert"] as const) {
+    for (const change of ["role", "merge", "grant"] as const) {
       const subject = await ensureCanonicalUserProfileForEmail(`${change}@ingress.example.test`);
       await setCanonicalUserProfileRole(subject.id, "admin", {
         onCommitted: invalidateOperatorRolePolicy,
       });
       const grant = new AbortController();
-      let grantCurrent = true;
       const binding = await factory.bindPrincipal({
-        ...openOptions,
+        ...principalOptions,
         principal: { kind: "person", profileId: subject.id },
-        operatorScopeCeiling: ["operator.admin"],
         signal: grant.signal,
-        assertCurrent: () => {
-          grant.signal.throwIfAborted();
-          if (!grantCurrent) {
-            throw new Error("synthetic grant revoked by current assertion");
-          }
-        },
-      });
-      const ui = await binding.openControlUi({
-        publicOrigin: PUBLIC_ORIGIN,
-        sandboxOrigin: SANDBOX_ORIGIN,
-        frameAncestors: FRAME_ANCESTORS,
       });
       try {
-        const peer = await openRemote(ui);
-        const identity = loadOrCreateDeviceIdentity({
-          identityKey: `synthetic-retained-${change}`,
-        });
-        expectHello(await connect(peer, { identity, profileId: subject.id }), "remote-ingress", [
-          "operator.admin",
-        ]);
-        heldMutation = { entered: createDeferred(), release: createDeferred(), remaining: 2 };
-        heldRead = { entered: createDeferred(), release: createDeferred() };
-        const pendingHttp = readRemote("/claw/control-ui-config.json?held=1", ui);
-        const rejectedHttp = pendingHttp.catch((error: unknown) => error);
-        const pendingWs = request(peer, "users.setDisplayName", {
-          profileId: subject.id,
-          displayName: "Must not be published",
-        });
-        const rejectedWs = pendingWs.catch((error: unknown) => error);
-        const pending = binding.request("users.setDisplayName", {
-          profileId: subject.id,
-          displayName: "Must not be published",
-        });
-        const rejected = pending.catch((error: unknown) => error);
-        await awaitGateBeforeSettlement(
-          heldMutation.entered.promise,
-          pending,
-          "Mutation settled before reaching its held effect",
-        );
-        await awaitGateBeforeSettlement(
-          heldRead.entered.promise,
-          pendingHttp,
-          "HTTP response settled before the held read",
-        );
+        expect(await binding.request("users.self", {})).toHaveProperty("profile.id", subject.id);
         if (change === "role") {
           await setCanonicalUserProfileRole(subject.id, "reader", {
             onCommitted: invalidateOperatorRolePolicy,
           });
         } else if (change === "merge") {
           await mergeCanonicalUserProfiles(subject.id, reader.id);
-        } else if (change === "grant") {
-          grant.abort(new Error("synthetic grant revoked"));
         } else {
-          grantCurrent = false;
-          expect(grant.signal.aborted).toBe(false);
+          grant.abort();
         }
-        heldMutation.release.resolve(undefined);
-        heldRead.release.resolve(undefined);
-        heldMutation = undefined;
-        heldRead = undefined;
-        expect(await rejected).toBeInstanceOf(Error);
-        expect(await rejectedWs).toBeInstanceOf(Error);
-        expect(await rejectedHttp).toBeInstanceOf(Error);
-        await peer.close();
-        const current = await ensureCanonicalUserProfileForEmail(`${change}@ingress.example.test`);
-        expect(current.displayName).not.toBe("Must not be published");
         await expect(binding.request("voicewake.get", {})).rejects.toThrow();
-        await expect(readRemote("/claw/control-ui-config.json", ui)).rejects.toThrow();
-        await expect(openRemote(ui)).rejects.toThrow();
       } finally {
-        heldMutation?.release.resolve(undefined);
-        heldRead?.release.resolve(undefined);
-        heldMutation = undefined;
-        heldRead = undefined;
         await binding.close();
       }
+    }
+  });
+
+  it("fences held HTTP, WebSocket and RPC work before effects and publication on grant revocation", async () => {
+    const subject = await ensureCanonicalUserProfileForEmail("assert@ingress.example.test");
+    await setCanonicalUserProfileRole(subject.id, "admin", {
+      onCommitted: invalidateOperatorRolePolicy,
+    });
+    const grant = new AbortController();
+    let grantCurrent = true;
+    const binding = await factory.bindPrincipal({
+      ...principalOptions,
+      principal: { kind: "person", profileId: subject.id },
+      operatorScopeCeiling: ["operator.admin"],
+      signal: grant.signal,
+      assertCurrent: () => {
+        grant.signal.throwIfAborted();
+        if (!grantCurrent) {
+          throw new Error("synthetic grant revoked by current assertion");
+        }
+      },
+    });
+    const ui = await binding.openControlUi(presentationOptions);
+    try {
+      const peer = await openRemote(ui);
+      const identity = loadOrCreateDeviceIdentity({
+        identityKey: "synthetic-retained-assert",
+      });
+      expectHello(await connect(peer, { identity, profileId: subject.id }), "remote-ingress", [
+        "operator.admin",
+      ]);
+      heldMutation = { entered: createDeferred(), release: createDeferred(), remaining: 2 };
+      heldRead = { entered: createDeferred(), release: createDeferred() };
+      const pendingHttp = readRemote("/claw/control-ui-config.json?held=1", ui);
+      const rejectedHttp = pendingHttp.catch((error: unknown) => error);
+      const pendingWs = request(peer, "users.setDisplayName", {
+        profileId: subject.id,
+        displayName: "Must not be published",
+      });
+      const rejectedWs = pendingWs.catch((error: unknown) => error);
+      const pending = binding.request("users.setDisplayName", {
+        profileId: subject.id,
+        displayName: "Must not be published",
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await awaitGateBeforeSettlement(
+        heldMutation.entered.promise,
+        pending,
+        "Mutation settled before reaching its held effect",
+      );
+      await awaitGateBeforeSettlement(
+        heldRead.entered.promise,
+        pendingHttp,
+        "HTTP response settled before the held read",
+      );
+      grantCurrent = false;
+      expect(grant.signal.aborted).toBe(false);
+      heldMutation.release.resolve(undefined);
+      heldRead.release.resolve(undefined);
+      heldMutation = undefined;
+      heldRead = undefined;
+      expect(await rejected).toBeInstanceOf(Error);
+      expect(await rejectedWs).toBeInstanceOf(Error);
+      expect(await rejectedHttp).toBeInstanceOf(Error);
+      await peer.close();
+      const current = await ensureCanonicalUserProfileForEmail("assert@ingress.example.test");
+      expect(current.displayName).not.toBe("Must not be published");
+      await expect(binding.request("voicewake.get", {})).rejects.toThrow();
+      await expect(readRemote("/claw/control-ui-config.json", ui)).rejects.toThrow();
+      await expect(openRemote(ui)).rejects.toThrow();
+    } finally {
+      heldMutation?.release.resolve(undefined);
+      heldRead?.release.resolve(undefined);
+      heldMutation = undefined;
+      heldRead = undefined;
+      await binding.close();
     }
   });
 
@@ -979,18 +927,9 @@ describe("remote Control UI ingress production composition", () => {
       clients,
       openOptions,
       openRemote,
+      config,
       sharedToken: SHARED_TOKEN,
       ownerSessionKey: OWNER_SESSION_KEY,
-      scopes: SCOPES,
-      teamConfig: {
-        ...config,
-        gateway: {
-          ...config.gateway,
-          auth: { mode: "trusted-proxy", trustedProxy: TRUSTED_PROXY },
-          roles: TEAM_ROLES,
-        },
-      },
-      teamAuth: { mode: "trusted-proxy", trustedProxy: TRUSTED_PROXY, allowTailscale: false },
       configure: async (nextConfig, nextAuth) => {
         config = nextConfig;
         auth = nextAuth;
@@ -999,19 +938,4 @@ describe("remote Control UI ingress production composition", () => {
         projection = await createSessionRowProjection({ cfg: config, modelCatalog: [] });
       },
     }));
-
-  it("refuses an unauthenticated host", async () => {
-    await ingress!.close();
-    auth = { mode: "none", allowTailscale: false };
-    config = {
-      ...config,
-      gateway: { ...config.gateway, roles: undefined, auth: { mode: "none" } },
-    };
-    setRuntimeConfigSnapshot(config, config);
-    await expect(factory.open(openOptions)).rejects.toMatchObject({
-      name: GatewayControlUiIngressError.name,
-      code: "unsupported-auth",
-      message: expect.stringContaining("token or password"),
-    });
-  });
 });

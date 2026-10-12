@@ -34,9 +34,9 @@ import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
   hasCurrentRemoteControlUiIngress,
-  type RemoteControlUiIngressContext,
 } from "../remote-control-ui-context.js";
 import type { GatewayRequestContext, GatewayRequestOptions } from "../server-methods/types.js";
+import type { RemoteControlUiIngressContext } from "./client-identity-types.js";
 import {
   runWithGatewayHttpWorkAdmission,
   runWithGatewayUpgradeWorkAdmission,

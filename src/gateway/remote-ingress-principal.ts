@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/users.js";
-import type { GatewayOperatorRoleDefinition } from "../config/types.gateway.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveHostAccountName } from "../infra/host-account-name.js";
 import {
@@ -16,29 +15,14 @@ import {
   projectUserProfileDisplay,
 } from "../state/user-profile-list.js";
 import { ensureCanonicalGatewayOwnerProfile } from "../state/user-profile-writes.js";
-import type { UserProfileIdentity } from "../state/user-profiles.types.js";
-import type { ResolvedGatewayAuth } from "./auth.js";
+import type { ResolvedGatewayAuth } from "./auth-resolve.js";
 import { resolveGatewayOperatorAccessAuthority } from "./operator-access-policy.js";
-import type { GatewayOperatorAccessAuthority } from "./operator-access-policy.types.js";
 import {
   onOperatorRolePolicyChanged,
   resolveOperatorRolePolicyForAssignment,
 } from "./operator-role-policy.js";
 import { remoteControlUiGatewayAuthError } from "./remote-control-ui-context.js";
-import type { GatewayOperatorRoleActor } from "./server-methods/shared-types.js";
-import type { GatewayWsClient } from "./server/ws-types.js";
-
-export type RemoteIngressPrincipalSnapshot = Readonly<{
-  bindingId: string;
-  authenticatedUserProfile: NonNullable<GatewayWsClient["authenticatedUserProfile"]>;
-  preparedSessionProfile: UserProfileIdentity;
-  operatorRoleActor: GatewayOperatorRoleActor;
-  operatorRolePolicy?: GatewayOperatorRoleDefinition;
-  operatorAccessAuthority?: GatewayOperatorAccessAuthority | null;
-  scopes: string[];
-  signal: AbortSignal;
-  assertCurrent(): void;
-}>;
+import type { RemoteIngressPrincipalSnapshot } from "./server/client-identity-types.js";
 
 /** One grant resolves its person once, then reads the existing profile owner's live facts. */
 export async function prepareRemoteIngressPrincipal(params: {
@@ -50,6 +34,7 @@ export async function prepareRemoteIngressPrincipal(params: {
   assertCurrent(): void;
 }): Promise<{
   resolve(): RemoteIngressPrincipalSnapshot;
+  assertCurrent(this: void): void;
   readonly signal: AbortSignal;
   close(): void;
 }> {
@@ -71,10 +56,7 @@ export async function prepareRemoteIngressPrincipal(params: {
     }
   };
   assertGrant();
-  if (
-    principal.kind === "person" &&
-    (!principal.profileId.trim() || principal.profileId === GATEWAY_OWNER_PROFILE_ID)
-  ) {
+  if (principal.kind === "person" && principal.profileId === GATEWAY_OWNER_PROFILE_ID) {
     throw new GatewayControlUiIngressError(
       "forbidden",
       "Person ingress requires an existing non-owner verified profile.",
@@ -85,7 +67,6 @@ export async function prepareRemoteIngressPrincipal(params: {
     const displayName = await resolveHostAccountName();
     assertGrant();
     await ensureCanonicalGatewayOwnerProfile(displayName, { assertCurrent: assertGrant });
-    assertGrant();
   }
   const prepared = await prepareUserProfileIdentity(profileId).catch(() => {
     throw new GatewayControlUiIngressError(
@@ -120,16 +101,14 @@ export async function prepareRemoteIngressPrincipal(params: {
     const initialIdentity = prepared.readCurrentFacts();
     const initial = initialIdentity.profile;
     const emailBindingIds = prepared.emailBindingIds;
-    const readRole = () => {
-      const current = prepared.readCurrentProfile(emailBindingIds, initial.githubAccountIds);
-      return resolveOperatorRolePolicyForAssignment(
+    const readRole = (current: typeof initial) =>
+      resolveOperatorRolePolicyForAssignment(
         profileId,
         current.assignedRole,
         params.getRuntimeConfig(),
         current.githubLogin ?? null,
       );
-    };
-    const role = principal.kind === "person" ? structuredClone(readRole()) : undefined;
+    const role = principal.kind === "person" ? structuredClone(readRole(initial)) : undefined;
     const access =
       principal.kind === "person"
         ? resolveGatewayOperatorAccessAuthority(profileId, params.getRuntimeConfig(), {
@@ -143,27 +122,26 @@ export async function prepareRemoteIngressPrincipal(params: {
     ]);
     const assertCurrent = () => {
       try {
-        signal.throwIfAborted();
         assertGrant();
         const currentIdentity = prepared.readCurrentFacts(emailBindingIds);
         const current = currentIdentity.profile;
-        prepared.readCurrentProfile(emailBindingIds, initial.githubAccountIds);
+        const row = resident.assertCurrent();
         const allowedUsers = params.getResolvedAuth().trustedProxy?.allowUsers;
         if (
-          current.profileId !== profileId ||
-          resident.assertCurrent().merged_into !== null ||
           !isDeepStrictEqual(currentIdentity.aliases, initialIdentity.aliases) ||
           initial.emails.some((email) => !current.emails.includes(email)) ||
+          initial.githubAccountIds?.some((id) => !current.githubAccountIds?.includes(id)) ||
           (principal.kind === "person" &&
             allowedUsers?.length &&
             !current.emails.some((email) => allowedUsers.includes(email))) ||
-          !isDeepStrictEqual(role, principal.kind === "person" ? readRole() : undefined)
+          !isDeepStrictEqual(role, principal.kind === "person" ? readRole(current) : undefined)
         ) {
           throw new Error("Principal identity or role changed");
         }
         access?.assertCurrent();
+        return { ...currentIdentity, row };
       } catch (error) {
-        invalidate(error);
+        return invalidate(error);
       }
     };
     const checkPublication = () => {
@@ -179,10 +157,9 @@ export async function prepareRemoteIngressPrincipal(params: {
     assertCurrent();
     return {
       signal,
+      assertCurrent,
       resolve() {
-        assertCurrent();
-        const { profile, aliases } = prepared.readCurrentFacts(emailBindingIds);
-        const row = resident.assertCurrent();
+        const { profile, aliases, row } = assertCurrent();
         const display = projectUserProfileDisplay(row);
         return {
           bindingId,
@@ -212,7 +189,6 @@ export async function prepareRemoteIngressPrincipal(params: {
         invalidated.abort(
           new GatewayControlUiIngressError("closed", "Remote ingress principal binding is closed."),
         );
-        release();
       },
     };
   } catch (error) {

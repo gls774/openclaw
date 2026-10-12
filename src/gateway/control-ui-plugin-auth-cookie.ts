@@ -20,8 +20,8 @@ import { isOperatorScope, type OperatorScope } from "./operator-scopes.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-  type RemoteControlUiIngressContext,
 } from "./remote-control-ui-context.js";
+import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 import { resolvePluginRoutePathContext } from "./server/plugins-http/path-context.js";
 
 // Cookies are hostname-scoped, never port-scoped. The suffix prevents trusted

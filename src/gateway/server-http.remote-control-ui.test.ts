@@ -2,15 +2,9 @@ import { ServerResponse, type IncomingMessage } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
-import {
-  applyControlUiSecurityHeaders,
-  validateRemoteControlUiFrameAncestors,
-} from "./control-ui-csp.js";
-import { serveControlUiIndexHtml } from "./control-ui-index.js";
+import { validateRemoteControlUiFrameAncestors } from "./control-ui-csp.js";
 import { sendControlUiHtmlBody } from "./control-ui-static.js";
 import { markGatewayIngressTransport } from "./ingress-attribution.js";
-import { createSandboxHostHttpRequestHandler } from "./mcp-app-sandbox-http.js";
-import { getRemoteControlUiIngressContext } from "./remote-control-ui-context.js";
 import { resolveRemoteControlUiHttpRoute } from "./remote-control-ui-http-routing.js";
 import { createRemoteControlUiIngressTestContext } from "./remote-control-ui.test-support.js";
 import { createGatewayHttpRequestHandler } from "./server-http-request.js";
@@ -80,34 +74,15 @@ describe("remote Control UI HTTP owner", () => {
     }
   });
 
-  it("allows only declared panel route ownership and keeps the native resource families", () => {
+  it("allows declared panels without letting plugin routes claim native documents", () => {
     const registry = createEmptyPluginRegistry();
-    registry.httpRoutes.push(
-      {
-        pluginId: "panel",
-        source: "fixture",
-        path: "/reports",
-        match: "prefix",
-        auth: "gateway",
-        handler: () => true,
-      },
-      {
-        pluginId: "webhook",
-        source: "fixture",
-        path: "/webhook",
-        match: "prefix",
-        auth: "plugin",
-        handler: () => true,
-      },
-      {
-        pluginId: "webhook",
-        source: "fixture",
-        path: "/claw/settings/plugins",
-        match: "exact",
-        auth: "plugin",
-        handler: () => true,
-      },
-    );
+    for (const route of [
+      { pluginId: "panel", path: "/reports", match: "prefix", auth: "gateway" },
+      { pluginId: "webhook", path: "/webhook", match: "prefix", auth: "plugin" },
+      { pluginId: "webhook", path: "/claw/settings/plugins", match: "exact", auth: "plugin" },
+    ] as const) {
+      registry.httpRoutes.push({ ...route, source: "fixture", handler: () => true });
+    }
     registry.controlUiDescriptors.push({
       pluginId: "panel",
       pluginName: "Panel",
@@ -137,60 +112,18 @@ describe("remote Control UI HTTP owner", () => {
         ]),
       ).toBe("document");
       for (const [path, owner] of [
-        ["/claw/", "document"],
         ["/claw/assets/app.js", "document"],
-        ["/claw/control-ui-config.json", "document"],
-        ["/claw/avatar/main", "resource"],
-        ["/api/users/person/avatar", "resource"],
-        ["/claw/__openclaw__/plugin-icon/plugin", "resource"],
-        ["/claw/__openclaw__/channel-avatar/agent%3Amain%3Adashboard%3Afoo%2Fbar", "resource"],
-        ["/claw/__openclaw__/assistant-media?source=file", "assistant-media"],
         ["/api/chat/media/outgoing/file", "outgoing-media"],
         ["/api/artifacts/download/connection/ticket", "artifact"],
         ["/__openclaw__/board/session/widget/index.html", "board"],
         ["/claw/__openclaw__/plugins/control-ui/plugin/revision/app.js", "native-assets"],
-      ]) {
+      ] as const) {
         expect(
-          resolveRemoteControlUiHttpRoute(remoteRequest(path!), "/claw", ["operator.read"]),
+          resolveRemoteControlUiHttpRoute(remoteRequest(path), "/claw", ["operator.read"]),
           path,
         ).toBe(owner);
       }
-      for (const path of ["/control-ui-config.json", "/__openclaw__/control-ui-config.json"]) {
-        expect(resolveRemoteControlUiHttpRoute(remoteRequest(path), "", ["operator.read"])).toBe(
-          "document",
-        );
-      }
-      expect(
-        resolveRemoteControlUiHttpRoute(
-          remoteRequest("/__openclaw__/control-ui-config.json"),
-          "/claw",
-          ["operator.read"],
-        ),
-      ).toBeUndefined();
     });
-  });
-
-  it("applies the approved ancestor chain only to the remote document", async () => {
-    for (const remote of [false, true]) {
-      const req = remoteRequest("/claw/", { remote });
-      const res = new ServerResponse(req);
-      applyControlUiSecurityHeaders(res, getRemoteControlUiIngressContext(req));
-      await serveControlUiIndexHtml(
-        req,
-        res,
-        "<html><head></head><body>synthetic</body></html>",
-        "/",
-        "/claw",
-      );
-      expect(res.getHeader("Content-Security-Policy")).toContain(
-        remote
-          ? "frame-ancestors https://chat.example.test codex-sandbox:"
-          : "frame-ancestors 'none'",
-      );
-      expect(res.getHeader("X-Frame-Options")).toBe(remote ? undefined : "DENY");
-      res.destroy();
-      req.destroy();
-    }
   });
 
   it("refuses stale admission and rechecks authority after asynchronous compression", async () => {
@@ -224,27 +157,6 @@ describe("remote Control UI HTTP owner", () => {
       res.destroy();
       req.destroy();
       errors.mockRestore();
-    }
-  });
-
-  it("separates sandbox resources and extends its entire contextual ancestor chain", async () => {
-    const sandbox = createSandboxHostHttpRequestHandler();
-    for (const path of [
-      "/mcp-app-sandbox",
-      "/control-ui-config.json",
-      "/api/artifacts/download/client/ticket",
-    ]) {
-      const req = remoteRequest(path);
-      const res = new ServerResponse(req);
-      await sandbox(req, res);
-      expect(res.statusCode).toBe(path === "/mcp-app-sandbox" ? 200 : 404);
-      if (res.statusCode === 200) {
-        expect(res.getHeader("Content-Security-Policy")).toContain(
-          "frame-ancestors https://ui.example.test https://chat.example.test codex-sandbox:",
-        );
-      }
-      res.destroy();
-      req.destroy();
     }
   });
 

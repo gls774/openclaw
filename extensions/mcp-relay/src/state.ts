@@ -86,7 +86,7 @@ function parseAuthority(value: Record<string, unknown>): RelayGrantAuthority {
   };
 }
 
-function parseCode(value: unknown, legacy: boolean): PairingCode {
+function parseCode(value: unknown): PairingCode {
   if (
     !isRecord(value) ||
     typeof value.codeHash !== "string" ||
@@ -99,11 +99,11 @@ function parseCode(value: unknown, legacy: boolean): PairingCode {
     codeHash: value.codeHash,
     expiresAt: value.expiresAt,
     consumed: value.consumed,
-    ...(legacy ? OWNER_AUTHORITY : parseAuthority(value)),
+    ...parseAuthority(value),
   };
 }
 
-function parseGrant(value: unknown, legacy: boolean): RelayGrant {
+function parseGrant(value: unknown): RelayGrant {
   if (!isRecord(value) || typeof value.grantId !== "string") {
     throw stateError();
   }
@@ -127,16 +127,16 @@ function parseGrant(value: unknown, legacy: boolean): RelayGrant {
     clientId: value.clientId,
     clientName: value.clientName,
     createdAt: value.createdAt,
-    ...(legacy ? OWNER_AUTHORITY : parseAuthority(value)),
+    ...parseAuthority(value),
     ...(value.lastUsedAt === undefined ? {} : { lastUsedAt: value.lastUsedAt }),
     ...(value.revokedAt === undefined ? {} : { revokedAt: value.revokedAt }),
   };
 }
 
-function parseRecord(value: unknown, migrateLegacy: boolean): RelayRecord {
+function parseRecord(value: unknown): RelayRecord {
   if (
     !isRecord(value) ||
-    (value.version !== 2 && !(migrateLegacy && value.version === 1)) ||
+    value.version !== 2 ||
     typeof value.relayOrigin !== "string" ||
     typeof value.privateKey !== "string" ||
     !Array.isArray(value.codes) ||
@@ -148,8 +148,8 @@ function parseRecord(value: unknown, migrateLegacy: boolean): RelayRecord {
     version: 2,
     relayOrigin: value.relayOrigin,
     privateKey: value.privateKey,
-    codes: value.codes.map((code) => parseCode(code, value.version === 1)),
-    grants: value.grants.map((grant) => parseGrant(grant, value.version === 1)),
+    codes: value.codes.map(parseCode),
+    grants: value.grants.map(parseGrant),
   };
   if (
     new Set(record.codes.map((code) => code.codeHash)).size !== record.codes.length ||
@@ -225,8 +225,8 @@ export class RelayState {
     });
   }
 
-  #record(value: unknown, migrateLegacy = false): RelayRecord {
-    const record = parseRecord(value, migrateLegacy);
+  #record(value: unknown): RelayRecord {
+    const record = parseRecord(value);
     if (record.relayOrigin !== this.#relayOrigin) {
       throw new RelayError(
         "unavailable",
@@ -239,23 +239,8 @@ export class RelayState {
   async initialize(): Promise<{ privateKey: string }> {
     const store = this.#currentStore();
     let observation = await store.observe(RECORD_KEY);
-    let candidate: RelayRecord | undefined;
-    for (;;) {
-      if (observation.value !== undefined) {
-        const record = this.#record(observation.value, true);
-        try {
-          identityFromPrivateKey(record.privateKey);
-        } catch {
-          throw stateError();
-        }
-        if (isRecord(observation.value) && observation.value.version === 2) {
-          this.#publishGrants(record);
-          return { privateKey: record.privateKey };
-        }
-        // Added authority metadata must not strand a full legacy store; only new admissions use the budget.
-        candidate = record;
-      }
-      candidate ??= {
+    while (observation.value === undefined) {
+      const record: RelayRecord = {
         version: 2,
         relayOrigin: this.#relayOrigin,
         privateKey: generateKeyPairSync("ed25519")
@@ -267,14 +252,22 @@ export class RelayState {
       const result = await store.compareAndApply(RECORD_KEY, observation.comparison, {
         operation: "update",
         action: "set",
-        value: candidate,
+        value: record,
       });
       if (result.status !== "conflict") {
-        this.#publishGrants(candidate);
-        return { privateKey: candidate.privateKey };
+        this.#publishGrants(record);
+        return { privateKey: record.privateKey };
       }
       observation = result.current;
     }
+    const record = this.#record(observation.value);
+    try {
+      identityFromPrivateKey(record.privateKey);
+    } catch {
+      throw stateError();
+    }
+    this.#publishGrants(record);
+    return { privateKey: record.privateKey };
   }
 
   async #update<T>(
@@ -327,6 +320,7 @@ export class RelayState {
     const store = this.#currentStore(assertOperationCurrent);
     let observation = await store.observe(RECORD_KEY);
     for (;;) {
+      // Parsing gives this attempt a private candidate; only a successful CAS publishes it.
       const record = this.#record(observation.value);
       const decision = decide(record);
       const result = await store
@@ -366,12 +360,9 @@ export class RelayState {
           "Pairing code already issued. Run openclaw mcp-relay pair again.",
         );
       }
-      const value = {
-        ...record,
-        codes: [...codes, { codeHash, expiresAt, consumed: false, ...issuedAuthority }],
-      };
-      assertCapacity(value);
-      return { value, result: undefined };
+      record.codes = [...codes, { codeHash, expiresAt, consumed: false, ...issuedAuthority }];
+      assertCapacity(record);
+      return { value: record, result: undefined };
     }, assertCommandCurrent);
   }
 
@@ -393,26 +384,18 @@ export class RelayState {
           return { result: false };
         }
         selectedExpiresAt = code.expiresAt;
-        const value: RelayRecord = {
-          ...record,
-          codes: record.codes.map((entry) =>
-            entry === code ? { ...entry, consumed: true } : entry,
-          ),
-          grants: [
-            ...record.grants,
-            {
-              grantId: params.grantId,
-              clientId: params.client.id,
-              clientName: params.client.name,
-              createdAt: now,
-              principal: code.principal,
-              ceiling: code.ceiling,
-              ...(code.principalLabel === undefined ? {} : { principalLabel: code.principalLabel }),
-            },
-          ],
-        };
-        assertCapacity(value);
-        return { value, result: true };
+        code.consumed = true;
+        record.grants.push({
+          grantId: params.grantId,
+          clientId: params.client.id,
+          clientName: params.client.name,
+          createdAt: now,
+          principal: code.principal,
+          ceiling: code.ceiling,
+          ...(code.principalLabel === undefined ? {} : { principalLabel: code.principalLabel }),
+        });
+        assertCapacity(record);
+        return { value: record, result: true };
       },
       () => {
         if (selectedExpiresAt !== undefined && selectedExpiresAt <= this.#now()) {
@@ -429,14 +412,14 @@ export class RelayState {
     grant: Omit<IssuedRelayGrant, "lastUsedAt" | "revokedAt">,
     assertCommandCurrent: () => void,
   ): Promise<boolean> {
-    const approvedGrant = parseGrant(grant, false);
+    const approvedGrant = parseGrant(grant);
     return this.#update((record) => {
       if (record.grants.some((entry) => entry.grantId === grant.grantId)) {
         return { result: false };
       }
-      const value = { ...record, grants: [...record.grants, approvedGrant] };
-      assertCapacity(value);
-      return { value, result: true };
+      record.grants.push(approvedGrant);
+      assertCapacity(record);
+      return { value: record, result: true };
     }, assertCommandCurrent);
   }
 
@@ -446,14 +429,8 @@ export class RelayState {
       if (!grant || !("createdAt" in grant) || grant.revokedAt !== undefined) {
         return { result: false };
       }
-      const usedGrant: IssuedRelayGrant = { ...grant, lastUsedAt: now };
-      return {
-        value: {
-          ...record,
-          grants: record.grants.map((entry) => (entry === grant ? usedGrant : entry)),
-        },
-        result: true,
-      };
+      grant.lastUsedAt = now;
+      return { value: record, result: true };
     });
     return authorized ? this.getGrant(grantId) : undefined;
   }
@@ -478,25 +455,15 @@ export class RelayState {
         if (!recordUnknown) {
           return { result: false };
         }
-        const value = {
-          ...record,
-          grants: [...record.grants, { grantId, revokedAt: now }],
-        };
-        assertCapacity(value);
-        return { value, result: true };
+        record.grants.push({ grantId, revokedAt: now });
+        assertCapacity(record);
+        return { value: record, result: true };
       }
       if (grant.revokedAt !== undefined) {
         return { result: true };
       }
-      return {
-        value: {
-          ...record,
-          grants: record.grants.map((entry) =>
-            entry === grant ? { ...entry, revokedAt: now } : entry,
-          ),
-        },
-        result: true,
-      };
+      grant.revokedAt = now;
+      return { value: record, result: true };
     }, assertCommandCurrent);
   }
 

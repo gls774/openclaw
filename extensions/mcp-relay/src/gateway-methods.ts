@@ -1,6 +1,6 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
-import { consentAuthority, ownsGrant, relayCaller } from "./caller.js";
+import { consentAuthority, relayCaller } from "./caller.js";
 import { RelayError, safeError } from "./protocol.js";
 import type { RelayService } from "./service.js";
 
@@ -68,9 +68,7 @@ export function registerMcpRelayGatewayMethods(
                 throw new RelayError("invalid_params", "Choose a connected app to revoke.");
               }
               const { grants } = await active.grants(caller);
-              assertCurrent();
-              const grant = grants.find((entry) => entry.grantId === params.grantId);
-              if (!grant || (!caller.canAdmin && !ownsGrant(caller, grant))) {
+              if (!grants.some((grant) => grant.grantId === params.grantId)) {
                 throw new RelayError(
                   "not_found",
                   "Connected app not found. Refresh the list and choose one of your apps.",

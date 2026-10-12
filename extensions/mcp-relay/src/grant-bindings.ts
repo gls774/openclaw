@@ -65,12 +65,8 @@ export class GrantBindings {
     });
     const binding = { abort, pending };
     this.#bindings.set(grantId, binding);
-    try {
-      return await pending;
-    } catch (error) {
-      this.revoke(grantId);
-      throw error;
-    }
+    void pending.catch(() => this.revoke(grantId));
+    return pending;
   }
 
   retireOnFailure(grantId: string, error: unknown): void {

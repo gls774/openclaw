@@ -6,7 +6,6 @@ import {
   type GatewayIngressSocketV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import type { PluginServiceSchedulerV1 } from "openclaw/plugin-sdk/plugin-entry";
-import { MAX_FRAME_BYTES } from "./protocol.js";
 import { type UiIngressAdmission, waitForUiIngress } from "./ui-tunnel-admission.js";
 import { UiRequestBody } from "./ui-tunnel-body.js";
 import {
@@ -41,21 +40,17 @@ type Grant = UiIngressAdmission & {
   id: string;
   publicOrigin: string;
   sandboxOrigin: string;
-  abort: AbortController;
   handle: Promise<GatewayControlUiIngressV1>;
 };
 type StreamBase = {
   sid: string;
   grant: Grant;
-  abort: AbortController;
+  scheduler: PluginServiceSchedulerV1;
   deadline?: { cancel: () => void };
-  jobs: Set<{ cancel: () => void }>;
 };
 type HttpStream = StreamBase & {
   kind: "http";
   input: UiRequestBody;
-  total: number;
-  ended: boolean;
   reader?: ReadableStreamDefaultReader<Uint8Array>;
 };
 type SocketStream = StreamBase & {
@@ -75,7 +70,6 @@ export class UiTunnel {
   readonly #closing = new Set<Promise<void>>();
   #buffered = 0;
   #serial = 0;
-  #stopped = false;
   #stopping?: Promise<void>;
 
   constructor(options: Options) {
@@ -89,7 +83,7 @@ export class UiTunnel {
   }
 
   receive(frame: Record<string, unknown>): void {
-    if (this.#stopped) {
+    if (this.#scheduler.signal.aborted) {
       return;
     }
     const sid = frame.sid;
@@ -98,9 +92,6 @@ export class UiTunnel {
       return;
     }
     try {
-      if (Buffer.byteLength(JSON.stringify(frame)) > MAX_FRAME_BYTES) {
-        throw new UiTunnelError("limit_exceeded", "Control UI frames are limited to 1 MiB.");
-      }
       if (frame.type === "ui.http" || frame.type === "ui.ws.open") {
         if (this.#streams.has(sid)) {
           invalid("The Control UI stream ID is already in use.");
@@ -137,7 +128,7 @@ export class UiTunnel {
           if (stream.kind !== "http") {
             invalid();
           }
-          this.#body(stream, frame);
+          stream.input.push(chunkBytes(frame.b64), moreFlag(frame.more));
           break;
         case "ui.cancel":
           if (stream.kind !== "http") {
@@ -182,7 +173,6 @@ export class UiTunnel {
   }
 
   close(): Promise<void> {
-    this.#fence();
     this.#scheduler.beginClose();
     this.#stopping ??= this.#scheduler.stop().then(async () => {
       await Promise.all(this.#closing);
@@ -191,10 +181,6 @@ export class UiTunnel {
   }
 
   #fence(): void {
-    if (this.#stopped) {
-      return;
-    }
-    this.#stopped = true;
     for (const stream of this.#streams.values()) {
       this.#finish(stream);
     }
@@ -204,7 +190,7 @@ export class UiTunnel {
   }
 
   #assertGrant(grant: Grant): void {
-    if (this.#stopped || grant.abort.signal.aborted || this.#grants.get(grant.id) !== grant) {
+    if (this.#scheduler.signal.aborted || this.#grants.get(grant.id) !== grant) {
       throw new UiTunnelError(
         "unavailable",
         "The Control UI ingress has closed. Open OpenClaw from ChatGPT again.",
@@ -215,7 +201,7 @@ export class UiTunnel {
 
   #assert(stream: Stream): void {
     this.#assertGrant(stream.grant);
-    if (this.#streams.get(stream.sid) !== stream || stream.abort.signal.aborted) {
+    if (this.#streams.get(stream.sid) !== stream) {
       throw new UiTunnelError("unavailable", "The Control UI stream has closed.");
     }
   }
@@ -246,13 +232,11 @@ export class UiTunnel {
     if (this.#grants.size + this.#closing.size >= 32) {
       throw new UiTunnelError("limit_exceeded", "Too many active Control UI grants.");
     }
-    const abort = new AbortController();
     // Start admission in a microtask after publishing the grant used by assertCurrent.
     const grant: Grant = {
       id: frame.grantId,
       publicOrigin,
       sandboxOrigin,
-      abort,
       waiters: new Set(),
       handle: Promise.resolve().then(async () => {
         this.#assertGrant(grant);
@@ -300,7 +284,6 @@ export class UiTunnel {
       return;
     }
     this.#grants.delete(grant.id);
-    grant.abort.abort();
     for (const stream of this.#streams.values()) {
       if (stream.grant === grant) {
         if (error) {
@@ -328,20 +311,6 @@ export class UiTunnel {
     this.#buffered += bytes;
   }
 
-  #send(frame: Record<string, unknown>): void {
-    const bytes = Buffer.byteLength(JSON.stringify(frame));
-    if (
-      bytes > MAX_FRAME_BYTES ||
-      this.#buffered + this.#options.bufferedBytes() + bytes > UI_BUFFER_BYTES
-    ) {
-      throw new UiTunnelError(
-        "limit_exceeded",
-        "The Control UI tunnel exceeded its output buffer limit.",
-      );
-    }
-    this.#options.send(frame);
-  }
-
   #fail(sid: string, error: unknown): void {
     const failure = uiError(error);
     const stream = this.#streams.get(sid);
@@ -351,9 +320,9 @@ export class UiTunnel {
         failure.code === "forbidden" || failure.code === "grant_revoked" ? 1008 : 1011,
       );
     }
-    if (!this.#stopped) {
+    if (!this.#scheduler.signal.aborted) {
       try {
-        this.#send({ type: "ui.error", sid, code: failure.code, message: failure.message });
+        this.#options.send({ type: "ui.error", sid, code: failure.code, message: failure.message });
       } catch {
         this.#options.closeRelay();
       }
@@ -365,12 +334,9 @@ export class UiTunnel {
       return;
     }
     this.#streams.delete(stream.sid);
-    stream.deadline?.cancel();
-    for (const job of stream.jobs) {
-      job.cancel();
-    }
-    stream.jobs.clear();
-    stream.abort.abort();
+    stream.scheduler.beginClose();
+    // Joining is asynchronous: a stream can finish inside one of its own callbacks.
+    void stream.scheduler.stop();
     if (stream.kind === "http") {
       stream.input.discard(new Error("Control UI request closed"));
       void stream.reader?.cancel().catch(() => undefined);
@@ -388,7 +354,7 @@ export class UiTunnel {
   }
 
   #run(stream: Stream, run: () => Promise<void>): void {
-    const job = this.#scheduler.schedule({
+    stream.scheduler.schedule({
       id: `ui-work:${++this.#serial}`,
       delayMs: 0,
       run: async () => {
@@ -403,18 +369,14 @@ export class UiTunnel {
               this.#fail(stream.sid, error);
             }
           }
-        } finally {
-          stream.jobs.delete(job);
         }
       },
     });
-    stream.jobs.add(job);
   }
 
   #deadline(stream: Stream, delayMs: number, message: string): void {
-    stream.deadline?.cancel();
-    stream.deadline = this.#scheduler.schedule({
-      id: `ui-deadline:${stream.sid}`,
+    stream.deadline = stream.scheduler.schedule({
+      id: "deadline",
       delayMs,
       run: () => {
         if (this.#streams.get(stream.sid) === stream) {
@@ -439,10 +401,7 @@ export class UiTunnel {
       kind: "http",
       sid,
       grant,
-      abort: new AbortController(),
-      jobs: new Set(),
-      total: 0,
-      ended: false,
+      scheduler: this.#scheduler.scope(),
       input: new UiRequestBody(
         (bytes) => this.#reserve(bytes),
         (bytes) => {
@@ -451,22 +410,22 @@ export class UiTunnel {
       ),
     };
     this.#streams.set(sid, stream);
-    this.#body(stream, frame);
+    stream.input.push(chunkBytes(frame.b64), moreFlag(frame.more));
     this.#deadline(
       stream,
       60_000,
       "The Gateway did not return Control UI response headers within 60 seconds.",
     );
     this.#run(stream, async () => {
-      const handle = await waitForUiIngress(grant, stream.abort.signal);
+      const handle = await waitForUiIngress(grant, stream.scheduler.signal);
       this.#assert(stream);
       const { response, pluginReadCookies } = await handle.request({
         surface,
         method,
         pathAndQuery,
         headers,
-        ...(stream.total || !stream.ended ? { body: stream.input.stream } : {}),
-        signal: stream.abort.signal,
+        ...(stream.input.hasBody ? { body: stream.input.stream } : {}),
+        signal: stream.scheduler.signal,
       });
       stream.reader = response.body?.getReader();
       try {
@@ -476,7 +435,7 @@ export class UiTunnel {
         throw error;
       }
       stream.deadline?.cancel();
-      this.#send({
+      this.#options.send({
         type: "ui.http.head",
         sid,
         status: response.status,
@@ -497,7 +456,7 @@ export class UiTunnel {
               const bytes = value.subarray(offset, offset + UI_CHUNK_BYTES);
               remaining -= bytes.byteLength;
               this.#buffered -= bytes.byteLength;
-              this.#send({
+              this.#options.send({
                 type: "ui.http.body",
                 sid,
                 b64: Buffer.from(bytes).toString("base64"),
@@ -510,23 +469,9 @@ export class UiTunnel {
         }
       }
       this.#assert(stream);
-      this.#send({ type: "ui.http.body", sid, b64: "", more: false });
+      this.#options.send({ type: "ui.http.body", sid, b64: "", more: false });
       this.#finish(stream);
     });
-  }
-
-  #body(stream: HttpStream, frame: Record<string, unknown>): void {
-    if (stream.ended) {
-      invalid("The HTTP request body is already complete.");
-    }
-    const bytes = chunkBytes(frame.b64);
-    const more = moreFlag(frame.more);
-    stream.total += bytes.length;
-    if (stream.total > 16 * 1024 * 1024) {
-      throw new UiTunnelError("limit_exceeded", "Control UI request bodies are limited to 16 MiB.");
-    }
-    stream.input.push(bytes, more);
-    stream.ended = !more;
   }
 
   #webSocket(sid: string, grant: Grant, frame: Record<string, unknown>): void {
@@ -554,8 +499,7 @@ export class UiTunnel {
       kind: "ws",
       sid,
       grant,
-      abort: new AbortController(),
-      jobs: new Set(),
+      scheduler: this.#scheduler.scope(),
       messages: [],
       sending: false,
     };
@@ -566,13 +510,13 @@ export class UiTunnel {
       "The Gateway did not open the Control UI socket within 10 seconds.",
     );
     this.#run(stream, async () => {
-      const handle = await waitForUiIngress(grant, stream.abort.signal);
+      const handle = await waitForUiIngress(grant, stream.scheduler.signal);
       this.#assert(stream);
       const { socket, protocol } = await handle.openWebSocket({
         pathAndQuery,
         origin,
         protocols,
-        signal: stream.abort.signal,
+        signal: stream.scheduler.signal,
       });
       stream.socket = socket;
       try {
@@ -585,7 +529,7 @@ export class UiTunnel {
         throw new UiTunnelError("invalid", "The Gateway selected an unoffered WebSocket protocol.");
       }
       stream.deadline?.cancel();
-      this.#send({ type: "ui.ws.opened", sid, ...(protocol ? { protocol } : {}) });
+      this.#options.send({ type: "ui.ws.opened", sid, ...(protocol ? { protocol } : {}) });
       const drain = async () => {
         for await (const message of socket.messages) {
           this.#assert(stream);
@@ -607,7 +551,7 @@ export class UiTunnel {
             if (message.kind === "text") {
               for (const chunk of textFrames(sid, message.text)) {
                 release(Buffer.byteLength(chunk.text));
-                this.#send(chunk);
+                this.#options.send(chunk);
               }
             } else {
               for (
@@ -617,7 +561,7 @@ export class UiTunnel {
               ) {
                 const chunk = message.bytes.subarray(offset, offset + UI_CHUNK_BYTES);
                 release(chunk.byteLength);
-                this.#send({
+                this.#options.send({
                   type: "ui.ws.msg",
                   sid,
                   b64: Buffer.from(chunk).toString("base64"),
@@ -632,7 +576,7 @@ export class UiTunnel {
       };
       const [, closed] = await Promise.all([drain(), socket.closed]);
       this.#assert(stream);
-      this.#send({ type: "ui.ws.close", sid, code: closed.code, reason: closed.reason });
+      this.#options.send({ type: "ui.ws.close", sid, code: closed.code, reason: closed.reason });
       this.#finish(stream);
     });
   }
@@ -697,7 +641,6 @@ export class UiTunnel {
           try {
             this.#assert(stream);
             await stream.socket?.send(queued.message);
-            this.#assert(stream);
           } finally {
             this.#buffered -= queued.bytes;
           }

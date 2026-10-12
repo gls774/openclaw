@@ -3,7 +3,11 @@ import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { RelayError } from "./protocol.js";
 import type { RelayGrant, RelayGrantAuthority } from "./state.js";
 
-export type RelayCaller = RelayGrantAuthority & { canAdmin: boolean; canPair: boolean };
+export type RelayCaller = RelayGrantAuthority & {
+  principalLabel: string;
+  canAdmin: boolean;
+  canPair: boolean;
+};
 
 export function relayCaller(
   client: GatewayRequestHandlerOptions["client"],

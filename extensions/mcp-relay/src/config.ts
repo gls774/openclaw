@@ -1,7 +1,7 @@
 import type { OpenClawPluginConfigSchema } from "openclaw/plugin-sdk/plugin-entry";
 import manifest from "../openclaw.plugin.json" with { type: "json" };
 
-export const DEFAULT_RELAY_URL = "https://mcp.openclaw.ai";
+const DEFAULT_RELAY_URL = "https://mcp.openclaw.ai";
 
 export type McpRelayConfig = {
   relayUrl: string;

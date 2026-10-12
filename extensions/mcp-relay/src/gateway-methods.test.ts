@@ -5,6 +5,7 @@ import type { OpenClawConfig, OpenClawPluginApi } from "openclaw/plugin-sdk/plug
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import plugin from "../index.js";
+import { consentAuthority, relayCaller } from "./caller.js";
 import { registerMcpRelayConnectRoute, registerMcpRelayGatewayMethods } from "./gateway-methods.js";
 import type { RelayGrantAuthority } from "./state.js";
 import { createTransportFixture } from "./transport.test-helpers.js";
@@ -142,41 +143,30 @@ describe("MCP relay Gateway consent and grant ownership", () => {
     );
   });
 
-  it.each([
-    { profileId: "person-bob" },
-    { principal: { kind: "person", profileId: "person-bob" } },
-    { principal: { kind: "owner" } },
-  ])("rejects caller-selected identities in approval params: %j", async (identity) => {
+  it("rejects caller-selected identities and scopes outside the admitted ceiling", async () => {
     const h = await harness();
-    const approve = vi.spyOn(h.service.consent, "approve");
-    expect(await h.request("authorize.approve", { requestId: REQUEST_ID, ...identity })).toEqual(
-      denied("invalid_params"),
+    const approve = vi.spyOn(h.service.consent, "approve").mockResolvedValue({
+      continueUrl: `${RELAY}/oauth/continue?request=${REQUEST_ID}`,
+    });
+    for (const params of [
+      { profileId: "person-bob" },
+      { principal: { kind: "person", profileId: "person-bob" } },
+      { principal: { kind: "owner" } },
+      { ceiling: ["operator.admin"] },
+    ]) {
+      expect(await h.request("authorize.approve", { requestId: REQUEST_ID, ...params })).toEqual(
+        denied("invalid_params"),
+      );
+    }
+    expect(approve).not.toHaveBeenCalled();
+    await h.request(
+      "authorize.approve",
+      { requestId: REQUEST_ID, ceiling: ["operator.admin"] },
+      caller(["operator.admin"], "person-alice"),
     );
-    expect(approve).not.toHaveBeenCalled();
-  });
-
-  it("limits the ceiling to the caller's admitted scopes and permits explicit admin consent", async () => {
-    const h = await harness();
-    const approve = vi
-      .spyOn(h.service.consent, "approve")
-      .mockResolvedValue({ continueUrl: "https://mcp.openclaw.ai/oauth/continue" });
-    expect(
-      await h.request("authorize.approve", { requestId: REQUEST_ID, ceiling: ["operator.admin"] }),
-    ).toEqual(denied("invalid_params"));
-    expect(approve).not.toHaveBeenCalled();
-    expect(
-      await h.request(
-        "authorize.approve",
-        { requestId: REQUEST_ID, ceiling: ["operator.admin"] },
-        caller(["operator.admin"], "person-alice"),
-      ),
-    ).toMatchObject([true, expect.any(Object)]);
     expect(approve).toHaveBeenCalledWith(
       REQUEST_ID,
-      expect.objectContaining({
-        principal: { kind: "person", profileId: "person-alice" },
-        ceiling: ["operator.admin"],
-      }),
+      expect.objectContaining({ ceiling: ["operator.admin"] }),
       expect.any(Function),
     );
   });
@@ -197,27 +187,16 @@ describe("MCP relay Gateway consent and grant ownership", () => {
         internal: { operatorRoleActor: { kind: "operator" as const, profileId: "person-bob" } },
       },
     },
-  ])("refuses personless or mismatched Team pairing: $name", async ({ client }) => {
-    const h = await harness();
-    const pair = vi.spyOn(h.service, "pair");
-    const result = await h.request("pair", {}, client);
-    expect(result).toEqual(denied("unavailable"));
-    expect(result?.[2]?.message).toContain("Connected apps");
-    expect(pair).not.toHaveBeenCalled();
+  ])("refuses personless or mismatched Team pairing: $name", ({ client }) => {
+    expect(() => relayCaller(client, TEAM)).toThrow("Connected apps");
   });
 
-  it("requires admin for single-user owner pairing and defaults to read/write", async () => {
-    const h = await harness({ gateway: { auth: { mode: "token" } } });
-    const pair = vi
-      .spyOn(h.service, "pair")
-      .mockResolvedValue({ code: "ABCDE-FGHJK", expiresAt: 600_000, mcpUrl: `${RELAY}/mcp` });
-    expect(await h.request("pair", {}, caller())).toEqual(denied("unavailable"));
-    expect(pair).not.toHaveBeenCalled();
-    expect(await h.request("pair", {}, caller(["operator.admin"]))).toMatchObject([
-      true,
-      expect.any(Object),
-    ]);
-    expect(pair).toHaveBeenCalledWith(expect.any(Function), {
+  it("requires admin for single-user owner pairing and defaults to read/write", () => {
+    const config: OpenClawConfig = { gateway: { auth: { mode: "token" } } };
+    expect(() => consentAuthority(relayCaller(caller(), config), undefined)).toThrow(
+      "Your Gateway role cannot connect apps",
+    );
+    expect(consentAuthority(relayCaller(caller(["operator.admin"]), config), undefined)).toEqual({
       principal: { kind: "owner" },
       principalLabel: "Gateway owner",
       ceiling: ["operator.read", "operator.write"],

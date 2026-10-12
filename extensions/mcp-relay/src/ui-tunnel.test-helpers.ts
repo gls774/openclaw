@@ -13,17 +13,7 @@ import { vi } from "vitest";
 import { RelayError } from "./protocol.js";
 import { UiTunnel } from "./ui-tunnel.js";
 
-export function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((yes, no) => {
-    resolve = yes;
-    reject = no;
-  });
-  return { promise, resolve, reject };
-}
-
-export class Mailbox<T> {
+class Mailbox<T> {
   readonly values: T[] = [];
   readonly #queue: T[] = [];
   readonly #readers: ((value: T) => void)[] = [];
@@ -49,7 +39,7 @@ export class Mailbox<T> {
 export class IngressSocket implements GatewayIngressSocketV1 {
   readonly incoming = new Mailbox<GatewayIngressMessage | undefined>();
   readonly sent = new Mailbox<GatewayIngressMessage>();
-  readonly closing = deferred<{ code: number; reason: string }>();
+  readonly closing = Promise.withResolvers<{ code: number; reason: string }>();
   readonly closed = this.closing.promise;
   readonly closes: { code: number; reason: string }[] = [];
   #ended = false;
@@ -134,12 +124,6 @@ export function fixture() {
   } satisfies GatewayControlUiIngressV1;
   const open = vi.fn<ConstructorParameters<typeof UiTunnel>[0]["open"]>(async () => handle);
   const active = new Set(["gr_one"]);
-  let bufferedBytes = 0;
-  const relayClosed = deferred<void>();
-  const closeRelay = vi.fn(() => {
-    relayClosed.resolve();
-    void tunnel.close();
-  });
   const tunnel = new UiTunnel({
     open,
     scheduler,
@@ -149,8 +133,10 @@ export function fixture() {
         throw new RelayError("grant_revoked", "Grant revoked");
       }
     },
-    bufferedBytes: () => bufferedBytes,
-    closeRelay,
+    bufferedBytes: () => 0,
+    closeRelay: () => {
+      void tunnel.close();
+    },
     send: (frame) => {
       if (!isRecord(frame)) {
         throw new Error("Expected a frame");
@@ -166,11 +152,6 @@ export function fixture() {
     open,
     sockets,
     active,
-    closeRelay,
-    relayClosed: relayClosed.promise,
-    setBuffered: (bytes: number) => {
-      bufferedBytes = bytes;
-    },
     receive: async (frame: Record<string, unknown>) => {
       tunnel.receive(frame);
       void clock.advanceBy(0);

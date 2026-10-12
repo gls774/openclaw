@@ -3,7 +3,7 @@ import { GatewayControlUiIngressError } from "openclaw/plugin-sdk/gateway-ingres
 import { isRecord, truncateUtf16Safe } from "openclaw/plugin-sdk/string-coerce-runtime";
 
 export const MAX_FRAME_BYTES = 1024 * 1024;
-export const MAX_RESULT_BYTES = 512 * 1024;
+const MAX_RESULT_BYTES = 512 * 1024;
 export type ErrorCode =
   | "invalid_params"
   | "not_found"
@@ -50,7 +50,7 @@ export function identityFromPrivateKey(privateKey: string) {
   };
 }
 
-export function normalizePairingCode(code: string): string {
+function normalizePairingCode(code: string): string {
   return code.toUpperCase().replace(/[-\s]/g, "").replace(/O/g, "0").replace(/[IL]/g, "1");
 }
 

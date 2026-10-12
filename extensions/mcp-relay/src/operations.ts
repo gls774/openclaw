@@ -8,7 +8,7 @@ import {
   type DeadlineGatewayRequest,
   type GatewayRequest,
 } from "./gateway-request.js";
-import { capResult, RelayError, truncateText } from "./protocol.js";
+import { RelayError, truncateText } from "./protocol.js";
 
 type Session = {
   key: string;
@@ -273,7 +273,6 @@ export function createOperations({
     conversationId: string,
     runId: string,
     waitMs: number,
-    assertAuthority: () => Promise<void>,
     request: DeadlineGatewayRequest,
     justSubmitted = false,
   ) {
@@ -282,13 +281,11 @@ export function createOperations({
       if (waitMs === 0 && justSubmitted) {
         return { ...base, status: "running" };
       }
-      await assertAuthority();
       const result = await request(
         "agent.wait",
         { runId, timeoutMs: waitMs },
         { timeoutMs: waitMs + 5_000 },
       );
-      await assertAuthority();
       await findSession(conversationId, request);
       if (!isRecord(result)) {
         throw new RelayError(
@@ -347,21 +344,20 @@ export function createOperations({
   async function execute(
     op: string,
     params: unknown,
-    assertAuthority: () => Promise<void>,
     request: DeadlineGatewayRequest,
   ): Promise<unknown> {
     switch (op) {
       case "status": {
         paramsObject(params, []);
         const roster = await listAgents(request);
-        return capResult({
+        return {
           gateway: { name: truncateText(gateway.name), version: truncateText(gateway.version) },
           agents: roster.agents.map((agent) => ({
             id: agent.id,
             name: agent.name,
             default: agent.id === roster.defaultId,
           })),
-        });
+        };
       }
       case "conversations.list": {
         const input = paramsObject(params, ["limit", "search", "agentId"]);
@@ -389,7 +385,7 @@ export function createOperations({
             "Conversation listing is unavailable. Retry in OpenClaw.",
           );
         }
-        return capResult({
+        return {
           conversations: result.sessions.map(sessionRow).map((session) =>
             Object.assign(
               {
@@ -403,7 +399,7 @@ export function createOperations({
                 : {},
             ),
           ),
-        });
+        };
       }
       case "conversation.read": {
         const input = paramsObject(params, ["conversationId", "limit", "before"]);
@@ -433,7 +429,7 @@ export function createOperations({
         ) {
           invalid("The conversation changed. Read it again without before.");
         }
-        return capResult({
+        return {
           conversationId,
           title: title(current),
           messages: page.messages.flatMap((value) => {
@@ -441,7 +437,7 @@ export function createOperations({
             return message ? [message] : [];
           }),
           ...(page.olderCursor ? { nextBefore: page.olderCursor } : {}),
-        });
+        };
       }
       case "message.send": {
         const input = paramsObject(params, ["message", "conversationId", "agentId", "waitMs"]);
@@ -457,7 +453,6 @@ export function createOperations({
           if (requestedAgentId && requestedAgentId !== session.agentId) {
             invalid("agentId does not own this conversation. Select the conversation's agent.");
           }
-          await assertAuthority();
           accepted = await request(
             "chat.send",
             {
@@ -482,9 +477,7 @@ export function createOperations({
               "The selected agent does not exist. Get the Gateway status and choose an available agent.",
             );
           }
-          await assertAuthority();
           accepted = await request("sessions.create", { agentId, message }, { timeoutMs: 15_000 });
-          await assertAuthority();
           if (!isRecord(accepted) || typeof accepted.key !== "string") {
             throw new RelayError(
               "unavailable",
@@ -509,21 +502,13 @@ export function createOperations({
           }
           resolvedConversationId = accepted.key;
         }
-        await assertAuthority();
         if (!isRecord(accepted) || typeof accepted.runId !== "string" || !accepted.runId) {
           throw new RelayError(
             "unavailable",
             "The Gateway did not return a run ID. Check the conversation in OpenClaw before sending again.",
           );
         }
-        return await observeRun(
-          resolvedConversationId,
-          accepted.runId,
-          waitMs,
-          assertAuthority,
-          request,
-          true,
-        );
+        return await observeRun(resolvedConversationId, accepted.runId, waitMs, request, true);
       }
       case "reply.get": {
         const input = paramsObject(params, ["conversationId", "runId", "waitMs"]);
@@ -531,7 +516,7 @@ export function createOperations({
         const runId = stringParam(input, "runId", 512, true)!;
         const waitMs = integerParam(input, "waitMs", 0, 50_000);
         await findSession(conversationId, request);
-        return await observeRun(conversationId, runId, waitMs, assertAuthority, request);
+        return await observeRun(conversationId, runId, waitMs, request);
       }
       default:
         return invalid("This operation is not supported.");
@@ -579,14 +564,13 @@ export function createOperations({
         .slice(0, 1000);
       logger.error(`mcp-relay: op=${op} method=${gatewayMethod} ${diagnostic}`);
     };
+    // The service owns admission/publication; host calls are the effect boundary.
     const request = createDeadlineGatewayRequest(
       async (method, requestParams, options) => {
         gatewayMethod = method;
         try {
           await assertAuthority();
-          const result = await boundRequest(method, requestParams, options);
-          await assertAuthority();
-          return result;
+          return await boundRequest(method, requestParams, options);
         } catch (error) {
           logFailure(error);
           throw error;
@@ -596,9 +580,7 @@ export function createOperations({
       now,
     );
     try {
-      const result = await execute(op, params, assertAuthority, request);
-      await assertAuthority();
-      return capResult(result);
+      return await execute(op, params, request);
     } catch (error) {
       if (!(error instanceof RelayError) || error.code === "internal") {
         logFailure(error);

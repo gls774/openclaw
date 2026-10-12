@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  codeHash,
-  identityFromPrivateKey,
-  normalizePairingCode,
-  truncateText,
-} from "./protocol.js";
+import { codeHash, identityFromPrivateKey, truncateText } from "./protocol.js";
 
 // Frozen cross-repository vectors, with the RFC 8410 PKCS#8 prefix around the seed.
 const PRIVATE_KEY = Buffer.from(
@@ -25,17 +20,10 @@ describe("MCP relay frozen protocol vectors", () => {
     );
   });
 
-  it.each([
-    ["ABCDE-FGHJK", "ABCDEFGHJK"],
-    ["abcde-fghjk ", "ABCDEFGHJK"],
-    ["OIL00-11111", "0110011111"],
-  ])("normalizes %j to the shared Crockford code %s", (input, expected) => {
-    expect(normalizePairingCode(input)).toBe(expected);
-  });
-
   it("hashes normalized pairing codes with the pairing domain separator", () => {
     expect(codeHash("ABCDE-FGHJK")).toBe("wO-MJVJ_Q4yi9dCUnbnvhGFaPWsCBKvgRKT4XHP083U");
     expect(codeHash("abcde-fghjk ")).toBe("wO-MJVJ_Q4yi9dCUnbnvhGFaPWsCBKvgRKT4XHP083U");
+    expect(codeHash("OIL00-11111")).toBe("raQE8MNXEnj-SVKvmsBpe2rcIWI_3CVL3f066ZVsf2o");
   });
 
   it("keeps complete surrogate pairs within the 16,000-character text budget", () => {

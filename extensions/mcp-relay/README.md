@@ -132,9 +132,8 @@ Relay revocations for unknown IDs persist an ID/timestamp tombstone too, so an
 in-flight grant creation cannot activate that ID afterward. These tombstones
 appear in the CLI grant list without invented client metadata.
 
-Updates migrate legacy grants and pairing codes in this plugin-owned record to
-owner principals with read/write ceilings. No core schema changes are needed. Disablement closes
-the service and its sockets; re-enablement keeps the same identity and grants.
+Disablement closes the service and its sockets; re-enablement keeps the same
+identity and grants. No core schema changes are needed.
 Restore a compatible backup when recovering corrupted state. Changing the relay
 origin is refused because existing authority belongs to the original relay.
 No Doctor contract is needed for a new plugin with no legacy files or config.

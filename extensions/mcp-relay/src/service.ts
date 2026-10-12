@@ -74,6 +74,7 @@ type ServiceOptions = {
 export class RelayService {
   readonly consent: RelayConsent;
   readonly #options: ServiceOptions;
+  readonly #ingress: GatewayControlUiIngressFactoryV2;
   readonly #pending = new Map<string, Pending>();
   #socket?: RelaySocket;
   #connection?: PluginServiceSchedulerV1;
@@ -87,13 +88,14 @@ export class RelayService {
 
   constructor(options: ServiceOptions) {
     this.#options = options;
+    this.#ingress = principalFactory(options.controlUiIngress);
     this.consent = new RelayConsent({
       relayUrl: options.relayUrl,
       request: (operation, params) => this.#request(operation, params),
       revoke: (grantId) => this.revoke(grantId),
       state: options.state,
       scheduler: options.scheduler,
-      controlUiIngress: options.controlUiIngress,
+      controlUiIngress: this.#ingress,
       config: options.config,
       requireReady: () => this.#requireReady(),
     });
@@ -138,13 +140,6 @@ export class RelayService {
 
   #uiStatus(): { available: boolean; basePath?: string; reason?: string } {
     const config = this.#options.config();
-    const factory = this.#options.controlUiIngress;
-    if (!factory || !("capabilityVersion" in factory) || factory.capabilityVersion !== 2) {
-      return {
-        available: false,
-        reason: "Update OpenClaw on this Gateway to show the full Control UI in ChatGPT.",
-      };
-    }
     if (!this.#ui) {
       return {
         available: false,
@@ -157,22 +152,12 @@ export class RelayService {
 
   #closeUi(): void {
     const bindings = this.#bindings;
-    this.#bindings = undefined;
-    if (bindings) {
-      const closing = bindings.close();
-      this.#closingUi.add(closing);
-      void closing.finally(() => this.#closingUi.delete(closing)).catch(() => undefined);
-    }
     const ui = this.#ui;
+    this.#bindings = undefined;
     this.#ui = undefined;
-    if (ui) {
-      const closing = ui.close();
-      this.#closingUi.add(closing);
-      void closing.then(
-        () => this.#closingUi.delete(closing),
-        () => this.#closingUi.delete(closing),
-      );
-    }
+    const closing = Promise.all([bindings?.close(), ui?.close()]).then(() => undefined);
+    this.#closingUi.add(closing);
+    void closing.finally(() => this.#closingUi.delete(closing)).catch(() => undefined);
   }
 
   async grants(caller?: RelayCaller) {
@@ -291,6 +276,8 @@ export class RelayService {
       return;
     }
     this.#socket = socket;
+    const bindings = new GrantBindings(this.#ingress, this.#options.state, connection.signal);
+    this.#bindings = bindings;
     let helloSent = false;
     let activeRequests = 0;
     const current = () =>
@@ -400,17 +387,7 @@ export class RelayService {
             socket.close(4400, "Invalid UI capability");
             return;
           }
-          try {
-            this.#bindings = new GrantBindings(
-              principalFactory(this.#options.controlUiIngress),
-              this.#options.state,
-              connection.signal,
-            );
-          } catch {
-            // A legacy host may connect for status, but cannot execute delegated operations.
-          }
-          const bindings = this.#bindings;
-          if (frameAncestors && bindings) {
+          if (frameAncestors) {
             this.#ui = new UiTunnel({
               open: async (grantId, presentation) => {
                 const binding = await bindings.get(grantId);
@@ -523,6 +500,17 @@ export class RelayService {
         });
         return;
       }
+      const grantId =
+        frame.op !== "grant.create" &&
+        frame.op !== "grant.revoked" &&
+        typeof frame.grantId === "string"
+          ? frame.grantId
+          : undefined;
+      const assertPublicationCurrent = () => {
+        if (grantId !== undefined) {
+          this.#options.state.assertGrantCurrent(grantId);
+        }
+      };
       activeRequests++;
       connection.schedule({
         id: `request:${++this.#sequence}`,
@@ -532,13 +520,20 @@ export class RelayService {
             if (!current()) {
               return;
             }
-            const result = capResult(await this.#handle(frame, assertConnectionCurrent));
+            const result = capResult(await this.#handle(frame, assertConnectionCurrent, bindings));
             if (current()) {
+              assertPublicationCurrent();
               this.#send(socket, { type: "res", id, ok: true, result });
             }
           } catch (error) {
             if (current()) {
-              this.#send(socket, { type: "res", id, ok: false, error: safeError(error) });
+              let failure = error;
+              try {
+                assertPublicationCurrent();
+              } catch (revoked) {
+                failure = revoked;
+              }
+              this.#send(socket, { type: "res", id, ok: false, error: safeError(failure) });
             }
           } finally {
             activeRequests--;
@@ -640,6 +635,7 @@ export class RelayService {
   async #handle(
     frame: Record<string, unknown>,
     assertConnectionCurrent: () => void,
+    bindings: GrantBindings,
   ): Promise<unknown> {
     const { op, params } = frame;
     const { state, scheduler } = this.#options;
@@ -648,24 +644,24 @@ export class RelayService {
     }
     if (op !== "grant.create" && op !== "grant.revoked") {
       const { grantId } = frame;
-      const assertAuthority = async () => {
-        assertConnectionCurrent();
-        if (typeof grantId !== "string" || !(await state.authorize(grantId, scheduler.now()))) {
-          throw new RelayError(
-            "grant_revoked",
-            "This connection was revoked. Run openclaw mcp-relay pair and connect again.",
-          );
-        }
-        assertConnectionCurrent();
-      };
-      await assertAuthority();
-      if (typeof grantId !== "string" || !this.#bindings) {
+      if (typeof grantId !== "string") {
         throw new RelayError(
-          "unavailable",
-          "Update OpenClaw to enable principal-bound MCP access.",
+          "grant_revoked",
+          "This connection was revoked. Run openclaw mcp-relay pair and connect again.",
         );
       }
-      const bindings = this.#bindings;
+      assertConnectionCurrent();
+      if (!(await state.authorize(grantId, scheduler.now()))) {
+        throw new RelayError(
+          "grant_revoked",
+          "This connection was revoked. Run openclaw mcp-relay pair and connect again.",
+        );
+      }
+      const assertAuthority = () => {
+        assertConnectionCurrent();
+        state.assertGrantCurrent(grantId);
+      };
+      assertAuthority();
       const binding = await bindings.get(grantId);
       const request: GatewayRequest = async (...args) => {
         try {
@@ -675,9 +671,12 @@ export class RelayService {
           throw error;
         }
       };
-      const result = await this.#options.operations(op, params, assertAuthority, request);
-      // Do not publish data after a revocation that raced an awaited SDK read.
-      await assertAuthority();
+      const result = await this.#options.operations(
+        op,
+        params,
+        async () => assertAuthority(),
+        request,
+      );
       return op === "status" && isRecord(result) ? { ...result, ui: this.#uiStatus() } : result;
     }
     if (

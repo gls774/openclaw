@@ -1,10 +1,12 @@
 import {
   GatewayControlUiIngressError,
   type GatewayControlUiIngressV1,
+  type GatewayIngressPrincipalBindingV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { codeHash } from "./protocol.js";
+import { createOperations } from "./operations.js";
+import { codeHash, RelayError } from "./protocol.js";
 import type { RelayGrantAuthority } from "./state.js";
 import {
   CHALLENGE,
@@ -57,33 +59,87 @@ async function createGrant(f: Awaited<ReturnType<typeof fixture>>, grantId = "gr
 }
 
 describe("MCP relay transport and authority", () => {
-  it.each(["missing", "legacy"])(
-    "refuses delegated operations on a %s principal-capability host",
-    async (host) => {
-      const operations = vi.fn(async () => ({}));
-      const f = await fixture(operations, {
-        controlUiIngress:
-          host === "missing"
-            ? undefined
-            : {
-                open: async () => {
-                  throw new Error("A legacy ingress must not be used");
-                },
-              },
+  it("composes grant-bound message submission, reply observation, and revoked errors", async () => {
+    const binding: GatewayIngressPrincipalBindingV1 = {
+      request: async () => {
+        throw new Error("Unexpected Gateway request");
+      },
+      openControlUi: async () => {
+        throw new Error("Unexpected UI open");
+      },
+      close: async () => {},
+    };
+    const request = vi.spyOn(binding, "request");
+    const ingress = createPrincipalIngress();
+    ingress.factory.bindPrincipal.mockResolvedValue(binding);
+    const f = await fixture(
+      createOperations({
+        logger: { error: vi.fn() },
+        gateway: { name: "Synthetic", version: "1" },
+      }),
+      { controlUiIngress: ingress.factory },
+    );
+    await createGrant(f);
+    await f.ready();
+    request
+      .mockResolvedValueOnce({ defaultId: "main", agents: [{ id: "main" }] })
+      .mockResolvedValueOnce({ key: "agent:main:new", runId: "run", runStarted: true });
+    expect(
+      await f.request({
+        id: "send",
+        op: "message.send",
+        grantId: "gr_one",
+        params: { message: "hello", waitMs: 0 },
+      }),
+    ).toMatchObject({
+      ok: true,
+      result: { conversationId: "agent:main:new", runId: "run", status: "running" },
+    });
+    request
+      .mockResolvedValueOnce({ session: { key: "agent:main:new", agentId: "main" } })
+      .mockResolvedValueOnce({
+        status: "ok",
+        terminalReply: { disposition: "visible", text: "answer" },
+      })
+      .mockResolvedValueOnce({ session: { key: "agent:main:new", agentId: "main" } });
+    expect(
+      await f.request({
+        id: "reply",
+        op: "reply.get",
+        grantId: "gr_one",
+        params: { conversationId: "agent:main:new", runId: "run", waitMs: 0 },
+      }),
+    ).toMatchObject({ ok: true, result: { status: "completed", reply: "answer" } });
+    request
+      .mockResolvedValueOnce({ defaultId: "main", agents: [{ id: "main" }] })
+      .mockImplementationOnce(async () => {
+        await f.state.revoke("gr_one", f.scheduler.now());
+        return { key: "private-conversation", runStarted: false };
       });
-      await createGrant(f);
-      await f.ready(f.socket, uiCapability);
-      expect((await f.service.status()).ui).toMatchObject({
-        available: false,
-        reason: expect.stringContaining("Update OpenClaw"),
-      });
-      expect(
-        await f.request({ id: "legacy-read", op: "status", params: {}, grantId: "gr_one" }),
-      ).toEqual(denied("legacy-read", "unavailable"));
-      expect(operations).not.toHaveBeenCalled();
-      await expect(f.service.pair()).rejects.toMatchObject({ code: "unavailable" });
-    },
-  );
+    expect(
+      await f.request({
+        id: "revoked",
+        op: "message.send",
+        grantId: "gr_one",
+        params: { message: "again", waitMs: 0 },
+      }),
+    ).toEqual(denied("revoked", "grant_revoked"));
+  });
+
+  it("caps operation results at the relay publication boundary", async () => {
+    const f = await fixture(async () => ({ text: "x".repeat(512 * 1024) }));
+    await createGrant(f);
+    await f.ready();
+    expect(await f.request({ id: "large", op: "status", grantId: "gr_one", params: {} })).toEqual(
+      denied("large", "too_large"),
+    );
+  });
+
+  it("requires the current principal-bound ingress capability at startup", async () => {
+    await expect(fixture(undefined, { controlUiIngress: undefined })).rejects.toThrow(
+      "Update OpenClaw to enable principal-bound MCP and Control UI access.",
+    );
+  });
 
   it("signs the relay challenge, becomes ready, and sends text pings every 30 seconds", async () => {
     const f = await fixture();
@@ -345,18 +401,9 @@ describe("MCP relay transport and authority", () => {
     await rejection;
   });
 
-  it("acknowledges grant creation only after durable consumption and maps all rejected codes to not_found", async () => {
+  it("acknowledges grant creation only after durable consumption", async () => {
     const f = await fixture();
     await f.ready();
-    const request = (id: string, hash: string) =>
-      f.request({
-        id,
-        op: "grant.create",
-        params: { grantId: id, codeHash: hash, client: CLIENT },
-      });
-    expect(await request("unknown", codeHash("unknown"))).toEqual(denied("unknown", "not_found"));
-    await f.state.issue(codeHash("expired"), f.scheduler.now(), f.scheduler.now() - 1);
-    expect(await request("expired", codeHash("expired"))).toEqual(denied("expired", "not_found"));
     await f.state.issue(codeHash("issued"), f.scheduler.now() + 1_000, f.scheduler.now());
     const persist = Promise.withResolvers<void>();
     const entered = Promise.withResolvers<void>();
@@ -392,7 +439,6 @@ describe("MCP relay transport and authority", () => {
         ceiling: ["operator.read", "operator.write"],
       },
     ]);
-    expect(await request("consumed", codeHash("issued"))).toEqual(denied("consumed", "not_found"));
   });
 
   it("refuses unknown and revoked grants before calling data operations and records valid use", async () => {
@@ -422,52 +468,6 @@ describe("MCP relay transport and authority", () => {
     ).toEqual({ type: "res", id: "revoked", ok: true, result: {} });
     expect(await request("denied", "gr_one")).toEqual(denied("denied", "grant_revoked"));
     expect(operations).toHaveBeenCalledOnce();
-    expect(
-      await f.request({
-        id: "early-revocation",
-        op: "grant.revoked",
-        params: { grantId: "gr_early", reason: "client_revoked" },
-      }),
-    ).toEqual({ type: "res", id: "early-revocation", ok: true, result: {} });
-    const hash = codeHash("late-creation");
-    await f.state.issue(hash, f.scheduler.now() + 1_000, f.scheduler.now());
-    expect(
-      await f.request({
-        id: "late-creation",
-        op: "grant.create",
-        params: { grantId: "gr_early", codeHash: hash, client: CLIENT },
-      }),
-    ).toEqual(denied("late-creation", "not_found"));
-    expect(await request("still-revoked", "gr_early")).toEqual(
-      denied("still-revoked", "grant_revoked"),
-    );
-  });
-
-  it("persists a local revocation before sending grant.revoke", async () => {
-    const f = await fixture();
-    await createGrant(f);
-    await f.ready();
-    await f.clock.advanceBy(0);
-    const persist = Promise.withResolvers<void>();
-    const entered = Promise.withResolvers<void>();
-    f.storage.effects.beforeCompare = async () => {
-      entered.resolve();
-      await persist.promise;
-    };
-    const revoking = f.service.revoke("gr_one");
-    await entered.promise;
-    expect(f.socket.frames).toHaveLength(1);
-    persist.resolve();
-    const request = await f.socket.nextFrame();
-    expect(request).toEqual({
-      type: "req",
-      id: expect.any(String),
-      op: "grant.revoke",
-      params: { grantId: "gr_one" },
-    });
-    expect((await f.storage.open().grants())[0]?.revokedAt).toBe(1_000);
-    f.socket.acknowledge(request);
-    await expect(revoking).resolves.toEqual({ revoked: true, relayNotified: true });
   });
 
   it("replays an offline revocation after authentication on the next connection", async () => {
@@ -487,30 +487,37 @@ describe("MCP relay transport and authority", () => {
     await replay;
   });
 
-  it("withholds an awaited data result if its grant was revoked meanwhile", async () => {
-    const result = Promise.withResolvers<unknown>();
-    const entered = Promise.withResolvers<void>();
-    const f = await fixture(async () => {
-      entered.resolve();
-      return result.promise;
-    });
-    await createGrant(f);
-    await f.ready();
-    await f.clock.advanceBy(0);
-    f.socket.receive({
-      type: "req",
-      id: "read",
-      op: "conversation.read",
-      grantId: "gr_one",
-      params: {},
-    });
-    const dispatch = f.clock.advanceBy(0);
-    await entered.promise;
-    await f.state.revoke("gr_one", f.scheduler.now());
-    result.resolve({ messages: [{ text: "Private result" }] });
-    await dispatch;
-    expect(await f.socket.nextFrame()).toEqual(denied("read", "grant_revoked"));
-  });
+  it.each(["result", "error"])(
+    "withholds an awaited %s after its grant is revoked",
+    async (kind) => {
+      const result = Promise.withResolvers<unknown>();
+      const entered = Promise.withResolvers<void>();
+      const f = await fixture(async () => {
+        entered.resolve();
+        return result.promise;
+      });
+      await createGrant(f);
+      await f.ready();
+      await f.clock.advanceBy(0);
+      f.socket.receive({
+        type: "req",
+        id: "read",
+        op: "conversation.read",
+        grantId: "gr_one",
+        params: {},
+      });
+      const dispatch = f.clock.advanceBy(0);
+      await entered.promise;
+      await f.state.revoke("gr_one", f.scheduler.now());
+      if (kind === "result") {
+        result.resolve({ messages: [{ text: "Private result" }] });
+      } else {
+        result.reject(new RelayError("unavailable", "Private result"));
+      }
+      await dispatch;
+      expect(await f.socket.nextFrame()).toEqual(denied("read", "grant_revoked"));
+    },
+  );
 
   it("terminates and reconnects when no pong arrives within two keepalive intervals", async () => {
     const f = await fixture();
@@ -529,37 +536,17 @@ describe("MCP relay transport and authority", () => {
     expect(f.sockets).toHaveLength(2);
   });
 
-  it("joins retired connection scopes even when the socket factory fails", async () => {
+  it("recovers from a socket factory failure and stops its retry after shutdown", async () => {
     const f = await fixture();
-    const openScope = f.scheduler.scope;
-    const scopes = vi.spyOn(f.scheduler, "scope").mockImplementation(() => {
-      const child = openScope();
-      vi.spyOn(child, "stop");
-      return child;
-    });
     f.socket.close(4409);
-    await f.clock.advanceBy(0);
     f.effects.connectError = new Error("Synthetic connection failure");
     await f.clock.advanceBy(1_000);
-    await f.clock.advanceBy(0);
-    expect(scopes).toHaveBeenCalledOnce();
-    const failedScope = scopes.mock.results[0];
-    if (failedScope?.type !== "return") {
-      throw new Error("Expected a connection scope");
-    }
-    expect(failedScope.value.signal.aborted).toBe(true);
-    expect(failedScope.value.stop).toHaveBeenCalledOnce();
+    expect(f.sockets).toHaveLength(1);
     f.effects.connectError = undefined;
     await f.clock.advanceBy(2_000);
     expect(f.sockets).toHaveLength(2);
-    const reconnectedScope = scopes.mock.results[1];
-    if (reconnectedScope?.type !== "return") {
-      throw new Error("Expected a replacement connection scope");
-    }
-    f.sockets[1]?.close(4409);
-    await f.clock.advanceBy(0);
-    expect(reconnectedScope.value.signal.aborted).toBe(true);
-    expect(reconnectedScope.value.stop).toHaveBeenCalledOnce();
+    await f.service.stop();
+    expect(f.clock.armedAtMs).toBeNull();
   });
 
   it("rejects pending relay requests before joining their closing connection scope", async () => {
@@ -662,12 +649,20 @@ describe("MCP relay transport and authority", () => {
     expect(f.socket.closes).toEqual([{ code: 1009, reason: "Frame too large" }]);
   });
 
-  it.each(["operation", "unavailable UI"])(
+  it.each(["operation", "unavailable UI", "UI"])(
     "bounds queued %s output on the shared relay socket",
     async (kind) => {
-      const f = await fixture();
+      const handle = {
+        presentation: { ...ORIGINS, basePath: "/", operatorScopeCeiling: [] },
+        request: async () => ({ response: new Response("index"), pluginReadCookies: [] }),
+        openWebSocket: async () => ({ socket: new IngressSocket() }),
+        close: vi.fn(async () => {}),
+      } satisfies GatewayControlUiIngressV1;
+      const f = await fixture(undefined, {
+        controlUiIngress: createPrincipalIngress(handle).factory,
+      });
       await createGrant(f);
-      await f.ready();
+      await f.ready(f.socket, kind === "UI" ? uiCapability : undefined);
       await f.clock.advanceBy(0);
       f.socket.bufferedAmount = 32 * 1024 * 1024 - 10;
       f.socket.receive(

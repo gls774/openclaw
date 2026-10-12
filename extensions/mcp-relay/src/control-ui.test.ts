@@ -35,19 +35,7 @@ afterEach(() => {
 });
 
 function rendered(predicate: () => boolean) {
-  if (predicate()) {
-    return Promise.resolve();
-  }
-  return new Promise<void>((resolve) => {
-    const observer = new MutationObserver(() => {
-      if (predicate()) {
-        observer.disconnect();
-        resolve();
-      }
-    });
-    cleanup.push(() => observer.disconnect());
-    observer.observe(document.body, { childList: true, subtree: true, attributes: true });
-  });
+  return vi.waitFor(() => expect(predicate()).toBe(true));
 }
 
 function fixture(request: ReturnType<typeof vi.fn>, props: Record<string, string> = {}) {

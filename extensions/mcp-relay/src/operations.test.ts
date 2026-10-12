@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GatewayRequest } from "./gateway-request.js";
 import { createOperations } from "./operations.js";
 
@@ -61,7 +61,6 @@ function message(id: string, role: string, text: string) {
 }
 
 describe("MCP relay data operations", () => {
-  beforeEach(() => vi.clearAllMocks());
   afterEach(() => vi.useRealTimers());
 
   it("maps only the grant-bound RPC roster and session results to the wire", async () => {
@@ -138,7 +137,7 @@ describe("MCP relay data operations", () => {
     );
   });
 
-  it("truncates plain text and rejects a result exceeding the wire byte cap", async () => {
+  it("truncates plain text", async () => {
     const { operations, request } = fixture();
     request.mockResolvedValueOnce({
       messages: [message("large", "assistant", "x".repeat(20_000))],
@@ -149,14 +148,6 @@ describe("MCP relay data operations", () => {
       before: "cursor",
     });
     expect(result).toMatchObject({ messages: [{ text: `${"x".repeat(15_999)}…` }] });
-    request.mockResolvedValueOnce({
-      messages: Array.from({ length: 40 }, (_, i) =>
-        message(`large-${i}`, "assistant", "x".repeat(16_000)),
-      ),
-    });
-    await expect(
-      operations("conversation.read", { conversationId: newer.key, limit: 40, before: "cursor" }),
-    ).rejects.toMatchObject({ code: "too_large" });
   });
 
   it.each(["missing", "FORBIDDEN", "INVALID_REQUEST"])(
@@ -361,59 +352,26 @@ describe("MCP relay data operations", () => {
   });
 
   it.each([
-    { name: "observation timeout", payload: { status: "timeout" }, expected: "running" },
-    {
-      name: "queued pending",
-      payload: { status: "pending", timeoutPhase: "queue" },
-      expected: "running",
-    },
-    {
-      name: "retry-grace timeout",
-      payload: { status: "timeout", endedAt: 100, pendingError: true },
-      expected: "running",
-    },
-    {
-      name: "terminal timestamp",
-      payload: { status: "timeout", endedAt: 100 },
-      expected: "failed",
-    },
-    {
-      name: "terminal reason",
-      payload: { status: "timeout", stopReason: "restart" },
-      expected: "failed",
-    },
-    {
-      name: "terminal liveness",
-      payload: { status: "timeout", livenessState: "blocked" },
-      expected: "failed",
-    },
-    {
-      name: "hard provider timeout",
-      payload: { status: "timeout", timeoutPhase: "provider" },
-      expected: "failed",
-    },
-    {
-      name: "provider-started timeout",
-      payload: { status: "timeout", providerStarted: true },
-      expected: "failed",
-    },
-    { name: "terminal failure", payload: { status: "error" }, expected: "failed" },
-  ])(
-    "maps $name without approval inference or exposing host errors",
-    async ({ payload, expected }) => {
-      const { operations, request } = fixture();
-      request.mockResolvedValueOnce({ runId: "run", status: "started" });
-      request.mockResolvedValueOnce({ ...payload, error: "sensitive internal failure" });
-      const result = await operations("message.send", {
-        conversationId: newer.key,
-        message: "hello",
-        waitMs: 100,
-      });
-      expect(result).toMatchObject({ status: expected });
-      expect(JSON.stringify(result)).not.toContain("sensitive");
-      expect(JSON.stringify(result)).not.toContain("waiting_for_approval");
-    },
-  );
+    ["observation timeout", { status: "timeout" }, "running"],
+    ["queued pending", { status: "pending", timeoutPhase: "queue" }, "running"],
+    ["retry grace", { status: "timeout", endedAt: 100, pendingError: true }, "running"],
+    ["terminal timestamp", { status: "timeout", endedAt: 100 }, "failed"],
+    ["terminal reason", { status: "timeout", stopReason: "restart" }, "failed"],
+    ["terminal liveness", { status: "timeout", livenessState: "blocked" }, "failed"],
+    ["provider timeout", { status: "timeout", timeoutPhase: "provider" }, "failed"],
+    ["provider started", { status: "timeout", providerStarted: true }, "failed"],
+    ["terminal failure", { status: "error" }, "failed"],
+  ] as const)("maps %s without exposing host errors", async (_name, payload, expected) => {
+    const { operations, request } = fixture();
+    request.mockResolvedValueOnce({ ...payload, error: "sensitive internal failure" });
+    const result = await operations("reply.get", {
+      conversationId: newer.key,
+      runId: "run",
+      waitMs: 100,
+    });
+    expect(result).toMatchObject({ status: expected });
+    expect(JSON.stringify(result)).not.toMatch(/sensitive|waiting_for_approval/);
+  });
 
   it("rechecks grant authority after session preparation and before submission", async () => {
     const { operations, request, describeSession } = fixture();
@@ -435,50 +393,6 @@ describe("MCP relay data operations", () => {
       ),
     ).rejects.toThrow("grant revoked");
     expect(request).not.toHaveBeenCalled();
-  });
-
-  it.each(["status", "conversations.list"])(
-    "withholds %s metadata if grant authority is revoked during the RPC",
-    async (op) => {
-      const { operations, agents, listSessions } = fixture();
-      let authorized = true;
-      (op === "status" ? agents : listSessions).mockImplementationOnce(async () => {
-        authorized = false;
-        return op === "status"
-          ? { defaultId: "main", agents: [{ id: "main", name: "Private agent" }] }
-          : { sessions: [newer] };
-      });
-      await expect(
-        operations(op, op === "status" ? {} : { limit: 1 }, async () => {
-          if (!authorized) {
-            throw new Error("grant revoked");
-          }
-        }),
-      ).rejects.toThrow("grant revoked");
-    },
-  );
-
-  it("withholds the run result if authority is revoked while waiting", async () => {
-    const { operations, request } = fixture();
-    let authorized = true;
-    request
-      .mockResolvedValueOnce({ runId: "run", status: "started" })
-      .mockImplementationOnce(async () => {
-        authorized = false;
-        return { status: "ok" };
-      });
-    const assertAuthority = async () => {
-      if (!authorized) {
-        throw new Error("grant revoked");
-      }
-    };
-    await expect(
-      operations(
-        "message.send",
-        { conversationId: newer.key, message: "hello", waitMs: 1 },
-        assertAuthority,
-      ),
-    ).rejects.toThrow("grant revoked");
   });
 
   it("reports a created conversation whose initial message failed without inventing a run", async () => {

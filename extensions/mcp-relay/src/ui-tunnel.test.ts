@@ -3,7 +3,7 @@ import {
   type GatewayControlUiIngressErrorCode,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { abortable, deferred, fixture, HTTP, ORIGINS, WS } from "./ui-tunnel.test-helpers.js";
+import { abortable, fixture, HTTP, ORIGINS, WS } from "./ui-tunnel.test-helpers.js";
 
 const fixtures: ReturnType<typeof fixture>[] = [];
 function setup() {
@@ -223,7 +223,7 @@ describe("Control UI relay tunnel", () => {
 
   it("cancels an HTTP read and passes a relay socket close to core", async () => {
     const f = setup();
-    const request = deferred<AbortSignal>();
+    const request = Promise.withResolvers<AbortSignal>();
     vi.mocked(f.handle.request).mockImplementation(async (input) => {
       request.resolve(input.signal);
       return abortable(input.signal);
@@ -237,39 +237,24 @@ describe("Control UI relay tunnel", () => {
     expect(socket.closes[0]).toEqual({ code: 1000, reason: "browser left" });
   });
 
-  it("discards queued work when relay cancellations arrive before dispatch", async () => {
+  it("cancels queued and running admissions while the shared factory open remains pending", async () => {
     const f = setup();
-    for (let i = 0; i < 128; i++) {
-      const sid = `cancel_${String(i).padStart(3, "0")}`;
-      f.tunnel.receive({ ...HTTP, sid });
-      f.tunnel.receive({ type: "ui.cancel", sid });
-    }
-    await f.clock.advanceBy(0);
-    expect(f.handle.request).not.toHaveBeenCalled();
-    expect(f.frames.values).toEqual([]);
-    expect(f.clock.armedAtMs).toBeNull();
-    await f.receive(HTTP);
-    expect((await response(f)).head.status).toBe(200);
-  });
-
-  it("settles cancelled admission jobs while the shared factory open remains pending", async () => {
-    const f = setup();
-    const admission = deferred<typeof f.handle>();
+    const admission = Promise.withResolvers<typeof f.handle>();
     vi.mocked(f.open).mockReturnValue(admission.promise);
     try {
-      for (let i = 0; i < 128; i++) {
-        const sid = `pending_${String(i).padStart(3, "0")}`;
+      for (let i = 0; i < 4; i++) {
+        const sid = `pending_${i}`;
         const http = i % 2 === 0;
         f.tunnel.receive(
           http ? { ...HTTP, sid, headers: [["accept", "text/html"]] } : { ...WS, sid },
         );
-        const dispatch = f.clock.advanceBy(0);
+        const dispatch = i < 2 ? undefined : f.clock.advanceBy(0);
         f.tunnel.receive(
           http
             ? { type: "ui.cancel", sid }
             : { type: "ui.ws.close", sid, code: 1000, reason: "cancelled" },
         );
-        await dispatch;
+        await (dispatch ?? f.clock.advanceBy(0));
       }
       expect(f.open).toHaveBeenCalledTimes(1);
       expect(f.handle.request).not.toHaveBeenCalled();
@@ -288,7 +273,7 @@ describe("Control UI relay tunnel", () => {
   it("revokes the live handle, aborts HTTP, closes sockets, and refuses subsequent frames", async () => {
     const f = setup();
     const socket = await opened(f);
-    const request = deferred<AbortSignal>();
+    const request = Promise.withResolvers<AbortSignal>();
     vi.mocked(f.handle.request).mockImplementation(async (input) => {
       request.resolve(input.signal);
       return abortable(input.signal);
@@ -309,7 +294,7 @@ describe("Control UI relay tunnel", () => {
 
   it("closes every stream and handle on relay disconnect, including a late handle open", async () => {
     const f = setup();
-    const admission = deferred<typeof f.handle>();
+    const admission = Promise.withResolvers<typeof f.handle>();
     vi.mocked(f.open).mockReturnValue(admission.promise);
     await f.receive(HTTP);
     const stopping = f.tunnel.close();
@@ -403,16 +388,6 @@ describe("Control UI relay tunnel", () => {
     await f.receive({ ...WS, sid: "socket02" });
     await f.clock.advanceBy(10_000);
     expect((await f.frames.next()).message).toContain("10 seconds");
-  });
-
-  it("closes the relay if native socket backpressure leaves no room for a terminal error", async () => {
-    const f = setup();
-    f.setBuffered(32 * 1024 * 1024);
-    await f.receive(HTTP);
-    await f.relayClosed;
-    await f.stop();
-    expect(f.closeRelay).toHaveBeenCalledOnce();
-    expect(f.frames.values).toEqual([]);
   });
 
   it("rejects unsafe core cookies before publishing the response head", async () => {

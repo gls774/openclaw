@@ -1,3 +1,5 @@
+import { UiTunnelError } from "./ui-tunnel-protocol.js";
+
 /** Request chunks stay outside the stream's internal queue so their byte budget is explicit. */
 export class UiRequestBody {
   readonly stream: ReadableStream<Uint8Array>;
@@ -6,6 +8,7 @@ export class UiRequestBody {
   readonly #release: (bytes: number) => void;
   #wake?: () => void;
   #ended = false;
+  #total = 0;
   #error?: Error;
 
   constructor(reserve: (bytes: number) => void, release: (bytes: number) => void) {
@@ -37,9 +40,17 @@ export class UiRequestBody {
     );
   }
 
+  get hasBody(): boolean {
+    return this.#total > 0 || !this.#ended;
+  }
+
   push(bytes: Uint8Array, more: boolean): void {
     if (this.#ended) {
-      throw new Error("HTTP request body is already complete");
+      throw new UiTunnelError("invalid", "The HTTP request body is already complete.");
+    }
+    this.#total += bytes.byteLength;
+    if (this.#total > 16 * 1024 * 1024) {
+      throw new UiTunnelError("limit_exceeded", "Control UI request bodies are limited to 16 MiB.");
     }
     if (bytes.byteLength) {
       this.#reserve(bytes.byteLength + 64);

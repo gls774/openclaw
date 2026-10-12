@@ -17,12 +17,12 @@ import { identityFromPrivateKey } from "./protocol.js";
 import { RelayService, type RelaySocket } from "./service.js";
 import { createStateFixture } from "./state.test-helpers.js";
 
-export const NONCE = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
+const NONCE = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc";
 export const GATEWAY_ID = "gw_ZbYGc9btiEvwHCwiLYKtoH";
 export const PUBLIC_KEY = "ebVWLo_mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ";
 export const SIGNATURE =
   "wZaNEXDNbmhncHDPb_N5xVWk2IJD78-z-jg0_zvwiSspB7jo63XSwGuj7cHFx2evxQ8kII2r6dRIFeNlcqISAQ";
-export const VECTOR_PRIVATE_KEY = Buffer.from(
+const VECTOR_PRIVATE_KEY = Buffer.from(
   "302e020100300506032b657004220420" +
     "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
   "hex",
@@ -43,7 +43,7 @@ function parseFrame(text: string): Record<string, unknown> {
   return frame;
 }
 
-export class FakeRelaySocket extends EventEmitter implements RelaySocket {
+class FakeRelaySocket extends EventEmitter implements RelaySocket {
   bufferedAmount = 0;
   readonly frames: Record<string, unknown>[] = [];
   readonly closes: { code?: number; reason?: string }[] = [];

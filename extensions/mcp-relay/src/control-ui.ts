@@ -4,33 +4,26 @@ import {
   type ControlUiDialogProps,
   type ControlUiView,
 } from "openclaw/plugin-sdk/control-ui";
+import type { RelayCaller } from "./caller.js";
 import "./control-ui.css";
 
-type Principal = { kind: "owner" } | { kind: "person"; profileId: string };
-type Caller = {
-  principal: Principal;
-  principalLabel: string;
-  ceiling: string[];
-  canAdmin: boolean;
-  canPair: boolean;
-};
 type Grant = {
   grantId: string;
   clientName?: string;
   createdAt?: number;
   revokedAt?: number;
   lastUsedAt?: number;
-  principal?: Principal;
+  principal?: RelayCaller["principal"];
   principalLabel?: string;
   ceiling?: string[];
 };
-type Grants = { grants: Grant[]; caller: Caller; relayUrl: string };
+type Grants = { grants: Grant[]; caller: RelayCaller; relayUrl: string };
 type Consent = {
   kind: "oauth" | "link";
   clientName: string;
   redirectHost: string;
   expiresAt: number;
-  caller: Caller;
+  caller: RelayCaller;
 };
 type Pairing = { code: string; expiresAt: number; mcpUrl: string };
 
@@ -199,6 +192,33 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
     let pairing: Pairing | undefined;
     let pairingBusy = false;
     let pairingError = "";
+    const createPairing = async () => {
+      if (pairingBusy || !snapshot?.caller.canPair || !canUse()) {
+        return;
+      }
+      const id = generation;
+      pairingBusy = true;
+      pairingError = "";
+      draw();
+      try {
+        const result = await host.request<Pairing>("mcp-relay.pair", {
+          ceiling: chosenCeiling(pairingFull),
+        });
+        if (!current(id) || !dialog) {
+          return;
+        }
+        pairing = result;
+      } catch (cause) {
+        if (!current(id) || !dialog) {
+          return;
+        }
+        pairingError = host.redact(
+          cause instanceof Error ? cause.message : "Pairing failed. Try again.",
+        );
+      }
+      pairingBusy = false;
+      draw();
+    };
     const draw = () => {
       content.replaceChildren();
       content.append(
@@ -227,36 +247,7 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
         );
         const create = button(
           pairingBusy ? "Creating code…" : "Create pairing code",
-          () => {
-            if (pairingBusy || !snapshot?.caller.canPair || !canUse()) {
-              return;
-            }
-            const id = generation;
-            const ceiling = chosenCeiling(pairingFull);
-            pairingBusy = true;
-            pairingError = "";
-            draw();
-            void host
-              .request<Pairing>("mcp-relay.pair", { ceiling })
-              .then((result) => {
-                if (current(id) && dialog) {
-                  pairing = result;
-                }
-              })
-              .catch((cause: unknown) => {
-                if (current(id) && dialog) {
-                  pairingError = host.redact(
-                    cause instanceof Error ? cause.message : "Pairing failed. Try again.",
-                  );
-                }
-              })
-              .finally(() => {
-                if (current(id) && dialog) {
-                  pairingBusy = false;
-                  draw();
-                }
-              });
-          },
+          () => void createPairing(),
           true,
         );
         create.disabled = pairingBusy || !chosenCeiling(pairingFull).length;
@@ -476,9 +467,6 @@ const mountConnectedApps: ControlUiView = (container, initialContext) => {
           button("Revoke", () => {
             void run(async (id) => {
               await host.request("mcp-relay.revoke", { grantId: grant.grantId });
-              if (!current(id)) {
-                return;
-              }
               const result = await host.request<Grants>("mcp-relay.grants", {});
               if (current(id)) {
                 snapshot = result;

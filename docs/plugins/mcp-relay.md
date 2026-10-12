@@ -106,7 +106,8 @@ over the existing outbound relay connection. The Gateway can remain on a private
 network. The relay gives each grant separate HTTPS origins for the UI and its
 sandbox, and preserves the Gateway's configured Control UI base path.
 
-This requires a current Gateway and relay. The embedded browser uses the grant's
+The plugin requires a current Gateway with principal-bound ingress support.
+The relay must also support the UI tunnel. The embedded browser uses the grant's
 principal and access limit; it does not receive or store an ordinary paired-device
 token. You do not paste the Gateway's shared token or password into ChatGPT.
 
@@ -195,11 +196,6 @@ the relay receives only the principal kind and display label. Effective access
 is the intersection of the ceiling and the principal's current authority, so a
 role change also limits existing grants. Grants are not restricted to one
 conversation; normal principal and role visibility still applies.
-
-Existing grants migrate to owner grants with read/write access. They continue to
-work on single-user Gateways. A Gateway that requires verified profiles refuses
-owner grants until they are replaced by a person grant through **Connected
-apps**. No core database migration is required.
 
 Person grants approved through Gateway sign-in have an absolute refresh-token
 lifetime of 30 days. After that, sign in and approve again. Owner grants and

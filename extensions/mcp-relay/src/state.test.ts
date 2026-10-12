@@ -13,12 +13,20 @@ const PERSON_AUTHORITY: RelayGrantAuthority = {
   principalLabel: "Synthetic person",
   ceiling: ["operator.admin"],
 };
+const GRANT = {
+  grantId: "gr_one",
+  clientId: CLIENT.id,
+  clientName: CLIENT.name,
+  createdAt: 10,
+  ...OWNER_AUTHORITY,
+};
+const PAIR = { grantId: GRANT.grantId, codeHash: "pair-hash", client: CLIENT };
 
 async function paired(f: ReturnType<typeof createStateFixture>) {
   const state = f.open();
   await state.initialize();
-  await state.issue("pair-hash", 1_000, 0);
-  await state.createGrant({ grantId: "gr_one", codeHash: "pair-hash", client: CLIENT }, 10);
+  await state.issue(PAIR.codeHash, 1_000, 0);
+  await state.createGrant(PAIR, 10);
   return state;
 }
 
@@ -40,108 +48,46 @@ describe("MCP relay durable authority", () => {
     expect(f.persisted()).toBe(saved);
   });
 
-  it("never replaces unreadable state or generates an identity after a storage error", async () => {
+  it("never replaces invalid state or generates an identity after a storage error", async () => {
     const f = createStateFixture();
-    await f.open().initialize();
+    const identity = await f.open().initialize();
     const saved = f.persisted();
     f.effects.failure = new Error("Storage unavailable");
     await expect(f.open().initialize()).rejects.toThrow("Storage unavailable");
     expect(f.persisted()).toBe(saved);
     f.effects.failure = undefined;
-    f.corrupt();
-    const corrupted = f.persisted();
-    await expect(f.open().initialize()).rejects.toThrow("Restore a valid OpenClaw state backup");
-    expect(f.persisted()).toBe(corrupted);
+    for (const value of [
+      null,
+      {
+        version: 2,
+        relayOrigin: "https://mcp.openclaw.ai",
+        privateKey: identity.privateKey,
+        codes: [],
+        grants: [{ ...GRANT, principal: { profileId: "person-one" } }],
+      },
+    ]) {
+      f.seed(value);
+      const invalid = f.persisted();
+      await expect(f.open().initialize()).rejects.toThrow("Restore a valid OpenClaw state backup");
+      expect(f.persisted()).toBe(invalid);
+    }
   });
 
-  it("migrates legacy grants and unused codes together without changing identity or revocations", async () => {
+  it("persists person authority and never reuses an existing or revoked grant ID", async () => {
     const f = createStateFixture();
-    const identity = await f.open().initialize();
-    f.seed({
-      version: 1,
-      relayOrigin: "https://mcp.openclaw.ai",
-      privateKey: identity.privateKey,
-      codes: [{ codeHash: "legacy-code", expiresAt: 1_000, consumed: false }],
-      grants: [
-        {
-          grantId: "gr_legacy",
-          clientId: CLIENT.id,
-          clientName: CLIENT.name,
-          createdAt: 10,
-          lastUsedAt: 20,
-        },
-        { grantId: "gr_revoked", revokedAt: 25 },
-      ],
-    });
-    const migrated = await Promise.all([f.open().initialize(), f.open().initialize()]);
-    expect(migrated).toEqual([identity, identity]);
-    expect(JSON.parse(f.persisted()!)).toMatchObject({
-      version: 2,
-      codes: [{ codeHash: "legacy-code", consumed: false, ...OWNER_AUTHORITY }],
-      grants: [
-        { grantId: "gr_legacy", createdAt: 10, lastUsedAt: 20, ...OWNER_AUTHORITY },
-        { grantId: "gr_revoked", revokedAt: 25 },
-      ],
-    });
-    const restarted = f.open();
-    await restarted.initialize();
-    await expect(restarted.authorize("gr_legacy", 30)).resolves.toMatchObject(OWNER_AUTHORITY);
-    await expect(
-      restarted.createGrant(
-        { grantId: "gr_from_legacy_code", codeHash: "legacy-code", client: CLIENT },
-        30,
-      ),
-    ).resolves.toBe(true);
-    expect(restarted.getGrant("gr_from_legacy_code")).toMatchObject(OWNER_AUTHORITY);
-    await expect(restarted.authorize("gr_revoked", 30)).resolves.toBeUndefined();
-  });
-
-  it("refuses current records with missing principal kinds instead of upgrading them to owner", async () => {
-    const f = createStateFixture();
-    const identity = await f.open().initialize();
-    f.seed({
-      version: 2,
-      relayOrigin: "https://mcp.openclaw.ai",
-      privateKey: identity.privateKey,
-      codes: [],
-      grants: [
-        {
-          grantId: "gr_invalid",
-          clientId: CLIENT.id,
-          clientName: CLIENT.name,
-          createdAt: 10,
-          principal: { profileId: "person-one" },
-          ceiling: ["operator.read"],
-        },
-      ],
-    });
-    const saved = f.persisted();
-    await expect(f.open().initialize()).rejects.toThrow("Restore a valid OpenClaw state backup");
-    expect(f.persisted()).toBe(saved);
-  });
-
-  it("persists approved person authority and never reuses an existing or revoked grant ID", async () => {
-    const f = createStateFixture();
-    const state = f.open();
-    await state.initialize();
-    const grant = {
-      grantId: "gr_consent",
-      clientId: CLIENT.id,
-      clientName: CLIENT.name,
-      createdAt: 10,
-      ...PERSON_AUTHORITY,
-    };
+    const state = await paired(f);
+    const grant = { ...GRANT, grantId: "gr_person", ...PERSON_AUTHORITY };
     const assertCurrent = () => {};
     await expect(state.approveGrant(grant, assertCurrent)).resolves.toBe(true);
     const restarted = f.open();
     await restarted.initialize();
-    expect(restarted.getGrant("gr_consent")).toEqual(grant);
-    await expect(restarted.authorize("gr_consent", 20)).resolves.toMatchObject(PERSON_AUTHORITY);
+    expect(restarted.getGrant(grant.grantId)).toEqual(grant);
+    await expect(restarted.authorize(grant.grantId, 20)).resolves.toMatchObject(PERSON_AUTHORITY);
     await expect(state.approveGrant({ ...grant, ...OWNER_AUTHORITY }, assertCurrent)).resolves.toBe(
       false,
     );
-    await state.recordRevocation("gr_consent", 30);
-    expect(state.getGrant("gr_consent")).toBeUndefined();
+    await state.recordRevocation(grant.grantId, 30);
+    expect(state.getGrant(grant.grantId)).toBeUndefined();
     await expect(state.approveGrant(grant, assertCurrent)).resolves.toBe(false);
     await state.recordRevocation("gr_unknown", 30);
     await expect(
@@ -149,89 +95,55 @@ describe("MCP relay durable authority", () => {
     ).resolves.toBe(false);
   });
 
-  it("atomically consumes a code once across concurrent grant requests and restart", async () => {
+  it("atomically consumes a code once across concurrent requests and restart", async () => {
     const f = createStateFixture();
     const state = f.open();
     await state.initialize();
-    await state.issue("hash", 1_000, 0, undefined, PERSON_AUTHORITY);
+    await state.issue(PAIR.codeHash, 1_000, 0, undefined, PERSON_AUTHORITY);
     const results = await Promise.all(
-      ["gr_a", "gr_b"].map((grantId) =>
-        f.open().createGrant({ grantId, codeHash: "hash", client: CLIENT }, 10),
-      ),
+      ["gr_a", "gr_b"].map((grantId) => f.open().createGrant({ ...PAIR, grantId }, 10)),
     );
-    expect(results.toSorted((left, right) => Number(left) - Number(right))).toEqual([false, true]);
+    expect(results.filter(Boolean)).toHaveLength(1);
     const grants = await f.open().grants();
     expect(grants).toHaveLength(1);
-    expect(grants[0]).toMatchObject({
-      clientId: CLIENT.id,
-      clientName: CLIENT.name,
-      createdAt: 10,
-      ...PERSON_AUTHORITY,
-    });
-    await expect(
-      state.createGrant({ grantId: "gr_c", codeHash: "hash", client: CLIENT }, 11),
-    ).resolves.toBe(false);
-    await expect(
-      state.createGrant({ grantId: "gr_d", codeHash: "unknown", client: CLIENT }, 11),
-    ).resolves.toBe(false);
+    expect(grants[0]).toMatchObject({ ...PERSON_AUTHORITY, clientId: CLIENT.id, createdAt: 10 });
+    for (const codeHash of [PAIR.codeHash, "unknown"]) {
+      await expect(state.createGrant({ ...PAIR, codeHash }, 11)).resolves.toBe(false);
+    }
     await state.issue("expired", 20, 0);
-    await expect(
-      state.createGrant({ grantId: "gr_e", codeHash: "expired", client: CLIENT }, 20),
-    ).resolves.toBe(false);
+    await expect(state.createGrant({ ...PAIR, codeHash: "expired" }, 20)).resolves.toBe(false);
   });
 
-  it("retains revocation tombstones and last-use facts through restart without resurrecting grant IDs", async () => {
+  it("retains revocation and last-use facts through restart without resurrecting grant IDs", async () => {
     const f = createStateFixture();
     const state = await paired(f);
-    expect(() => state.assertGrantCurrent("gr_one")).not.toThrow();
+    expect(() => state.assertGrantCurrent(GRANT.grantId)).not.toThrow();
     expect(() => state.assertGrantCurrent("unknown")).toThrow("revoked");
     await expect(state.authorize("unknown", 20)).resolves.toBeUndefined();
-    await expect(state.authorize("gr_one", 20)).resolves.toMatchObject(OWNER_AUTHORITY);
-    await expect(f.open().grants()).resolves.toEqual([
-      {
-        grantId: "gr_one",
-        clientId: CLIENT.id,
-        clientName: CLIENT.name,
-        createdAt: 10,
-        lastUsedAt: 20,
-        ...OWNER_AUTHORITY,
-      },
-    ]);
-    await expect(state.revoke("gr_one", 30)).resolves.toBe(true);
-    expect(() => state.assertGrantCurrent("gr_one")).toThrow("revoked");
+    await expect(state.authorize(GRANT.grantId, 20)).resolves.toMatchObject(OWNER_AUTHORITY);
+    await expect(state.revoke(GRANT.grantId, 30)).resolves.toBe(true);
+    expect(() => state.assertGrantCurrent(GRANT.grantId)).toThrow("revoked");
     const restarted = f.open();
     await restarted.initialize();
-    expect(() => restarted.assertGrantCurrent("gr_one")).toThrow("revoked");
-    await expect(f.open().authorize("gr_one", 40)).resolves.toBeUndefined();
+    await expect(restarted.authorize(GRANT.grantId, 40)).resolves.toBeUndefined();
     await state.issue("fresh", 1_000, 40);
+    await expect(state.createGrant({ ...PAIR, codeHash: "fresh" }, 40)).resolves.toBe(false);
     await expect(
-      state.createGrant({ grantId: "gr_one", codeHash: "fresh", client: CLIENT }, 40),
-    ).resolves.toBe(false);
-    await expect(
-      state.createGrant({ grantId: "gr_two", codeHash: "fresh", client: CLIENT }, 40),
+      state.createGrant({ ...PAIR, grantId: "gr_two", codeHash: "fresh" }, 40),
     ).resolves.toBe(true);
     await restarted.initialize();
     expect(() => restarted.assertGrantCurrent("gr_two")).not.toThrow();
-    expect((await f.open().grants())[0]).toMatchObject({ lastUsedAt: 20, revokedAt: 30 });
+    expect((await restarted.grants())[0]).toEqual({ ...GRANT, lastUsedAt: 20, revokedAt: 30 });
   });
 
   it("does not overwrite a concurrent revocation with an authorization prepared earlier", async () => {
     const f = createStateFixture();
     const state = await paired(f);
     f.effects.beforeCompare = async () => {
-      await f.open().revoke("gr_one", 20);
+      await f.open().revoke(GRANT.grantId, 20);
     };
-    await expect(state.authorize("gr_one", 30)).resolves.toBeUndefined();
-    await expect(f.open().grants()).resolves.toEqual([
-      {
-        grantId: "gr_one",
-        clientId: CLIENT.id,
-        clientName: CLIENT.name,
-        createdAt: 10,
-        revokedAt: 20,
-        ...OWNER_AUTHORITY,
-      },
-    ]);
+    await expect(state.authorize(GRANT.grantId, 30)).resolves.toBeUndefined();
+    await expect(f.open().grants()).resolves.toEqual([{ ...GRANT, revokedAt: 20 }]);
   });
 
   it.each(["before creation", "while creation is pending"])(
@@ -240,96 +152,68 @@ describe("MCP relay durable authority", () => {
       const f = createStateFixture();
       const state = f.open();
       await state.initialize();
-      await state.issue("hash", 1_000, 0);
-      await expect(state.revoke("gr_one", 10)).resolves.toBe(false);
-      await expect(state.grants()).resolves.toEqual([]);
+      await state.issue(PAIR.codeHash, 1_000, 0);
+      await expect(state.revoke(GRANT.grantId, 10)).resolves.toBe(false);
       if (ordering === "before creation") {
-        await state.recordRevocation("gr_one", 20);
+        await state.recordRevocation(GRANT.grantId, 20);
       } else {
         f.effects.beforeCompare = async () => {
-          await f.open().recordRevocation("gr_one", 20);
+          await f.open().recordRevocation(GRANT.grantId, 20);
         };
       }
-      await expect(
-        state.createGrant({ grantId: "gr_one", codeHash: "hash", client: CLIENT }, 10),
-      ).resolves.toBe(false);
+      await expect(state.createGrant(PAIR, 10)).resolves.toBe(false);
       const reopened = f.open();
       await reopened.initialize();
-      await expect(reopened.authorize("gr_one", 30)).resolves.toBeUndefined();
-      await reopened.recordRevocation("gr_one", 40);
-      await expect(reopened.grants()).resolves.toEqual([{ grantId: "gr_one", revokedAt: 20 }]);
-      await expect(
-        reopened.createGrant({ grantId: "gr_one", codeHash: "hash", client: CLIENT }, 50),
-      ).resolves.toBe(false);
+      await expect(reopened.authorize(GRANT.grantId, 30)).resolves.toBeUndefined();
+      await reopened.recordRevocation(GRANT.grantId, 40);
+      await expect(reopened.grants()).resolves.toEqual([{ grantId: GRANT.grantId, revokedAt: 20 }]);
+      await expect(reopened.createGrant(PAIR, 50)).resolves.toBe(false);
     },
   );
 
-  it("rejects oversized admission without consuming the code and preserves space for revocation", async () => {
+  it("rejects oversized admission without consuming the code and reserves revocation capacity", async () => {
     const f = createStateFixture();
     const state = f.open();
     await state.initialize();
-    await state.issue("hash", 1_000, 0);
-    await expect(
-      state.createGrant(
-        {
-          grantId: "gr_big",
-          codeHash: "hash",
-          client: { id: CLIENT.id, name: "x".repeat(512 * 1024) },
-        },
-        10,
-      ),
-    ).rejects.toThrow("capacity");
-    await expect(
-      state.createGrant(
-        {
-          grantId: "gr_big",
-          codeHash: "hash",
-          client: { id: CLIENT.id, name: "x".repeat(511 * 1024) },
-        },
-        10,
-      ),
-    ).resolves.toBe(true);
-    await expect(state.authorize("gr_big", 20)).resolves.toMatchObject(OWNER_AUTHORITY);
+    await state.issue(PAIR.codeHash, 1_000, 0);
+    const bigGrant = (size: number) => ({ ...PAIR, client: { ...CLIENT, name: "x".repeat(size) } });
+    await expect(state.createGrant(bigGrant(512 * 1024), 10)).rejects.toThrow("capacity");
+    await expect(state.createGrant(bigGrant(511 * 1024), 10)).resolves.toBe(true);
+    await expect(state.authorize(GRANT.grantId, 20)).resolves.toMatchObject(OWNER_AUTHORITY);
     await expect(state.recordRevocation(`gr_${"x".repeat(1_024)}`, 25)).rejects.toThrow("capacity");
-    await state.recordRevocation("gr_big", 30);
-    await expect(f.open().authorize("gr_big", 40)).resolves.toBeUndefined();
+    await state.recordRevocation(GRANT.grantId, 30);
+    await expect(f.open().authorize(GRANT.grantId, 40)).resolves.toBeUndefined();
     expect((await f.open().grants())[0]).toMatchObject({ lastUsedAt: 20, revokedAt: 30 });
   });
 
-  it("never retries uncertain committed writes and leaves their durable grant consumed", async () => {
+  it("never retries uncertain committed writes and leaves their durable code consumed", async () => {
     const f = createStateFixture();
     const state = f.open();
     await state.initialize();
-    await state.issue("hash", 1_000, 0);
+    await state.issue(PAIR.codeHash, 1_000, 0);
     f.effects.afterCommit = () => {
       throw new Error("Reply lost after commit");
     };
-    await expect(
-      state.createGrant({ grantId: "gr_one", codeHash: "hash", client: CLIENT }, 10),
-    ).rejects.toThrow("Reply lost");
+    await expect(state.createGrant(PAIR, 10)).rejects.toThrow("Reply lost");
     await expect(f.open().grants()).resolves.toHaveLength(1);
-    await expect(
-      state.createGrant({ grantId: "gr_two", codeHash: "hash", client: CLIENT }, 20),
-    ).resolves.toBe(false);
+    await expect(state.createGrant({ ...PAIR, grantId: "gr_two" }, 20)).resolves.toBe(false);
   });
 
   it("refuses a pairing code that expires while grant persistence is pending", async () => {
     const f = createStateFixture();
     const state = f.open();
     await state.initialize();
-    await state.issue("hash", 1_000, 0);
+    await state.issue(PAIR.codeHash, 1_000, 0);
     const saved = f.persisted();
     f.effects.beforeCompare = async () => {
       f.setNow(1_000);
     };
-    await expect(
-      state.createGrant({ grantId: "gr_one", codeHash: "hash", client: CLIENT }, 10),
-    ).rejects.toMatchObject({ code: "not_found" });
+    await expect(state.createGrant(PAIR, 10)).rejects.toMatchObject({ code: "not_found" });
     expect(f.persisted()).toBe(saved);
   });
 
-  it.each(["issue", "revoke", "approve"] as const)(
-    "carries the %s command authority into pending persistence",
+  it.each(["issue", "revoke", "approve", "service"] as const)(
+    "carries %s authority into pending persistence",
     async (operation) => {
       const f = createStateFixture();
       const state = await paired(f);
@@ -341,36 +225,25 @@ describe("MCP relay durable authority", () => {
         }
       };
       f.effects.beforeCompare = async () => {
-        commandCurrent = false;
+        if (operation === "service") {
+          f.stop();
+        } else {
+          commandCurrent = false;
+        }
       };
       const pending =
         operation === "issue"
           ? state.issue("fresh", 1_000, 30, assertCommandCurrent)
-          : operation === "revoke"
-            ? state.revoke("gr_one", 30, assertCommandCurrent)
-            : state.approveGrant(
-                {
-                  grantId: "gr_consent",
-                  clientId: CLIENT.id,
-                  clientName: CLIENT.name,
-                  createdAt: 30,
-                  ...PERSON_AUTHORITY,
-                },
+          : operation === "approve"
+            ? state.approveGrant(
+                { ...GRANT, grantId: "gr_person", ...PERSON_AUTHORITY },
                 assertCommandCurrent,
-              );
-      await expect(pending).rejects.toThrow("Command authority revoked");
+              )
+            : state.revoke(GRANT.grantId, 30, assertCommandCurrent);
+      await expect(pending).rejects.toThrow(
+        operation === "service" ? "Service stopped" : "Command authority revoked",
+      );
       expect(f.persisted()).toBe(saved);
     },
   );
-
-  it("carries service lifetime through pending write admission", async () => {
-    const f = createStateFixture();
-    const state = await paired(f);
-    const saved = f.persisted();
-    f.effects.beforeCompare = async () => {
-      f.stop();
-    };
-    await expect(state.revoke("gr_one", 30)).rejects.toThrow("Service stopped");
-    expect(f.persisted()).toBe(saved);
-  });
 });

@@ -35,14 +35,8 @@ export function createStateFixture() {
     return {
       lookup,
       observe: async () => {
-        assertion();
-        if (effects.failure) {
-          throw effects.failure;
-        }
-        return {
-          value: serialized === undefined ? undefined : JSON.parse(serialized),
-          comparison: String(revision),
-        };
+        const comparison = String(revision);
+        return { value: await lookup(), comparison };
       },
       compareAndApply: async (_key, comparison, intent) => {
         const before = effects.beforeCompare;
@@ -105,9 +99,6 @@ export function createStateFixture() {
     open: (url = RELAY) => new RelayState(runtime, url, assertCurrent, () => now),
     stop: () => {
       current = false;
-    },
-    corrupt: () => {
-      serialized = '{"version":1,"privateKey":"bad"}';
     },
     seed: (value: unknown) => {
       serialized = JSON.stringify(value);

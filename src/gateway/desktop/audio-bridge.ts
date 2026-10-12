@@ -9,7 +9,7 @@ import { rejectWebSocketUpgrade } from "../../shared/websocket-upgrade-reject.js
 import {
   getRemoteControlUiIngressContext,
   hasCurrentRemoteControlUiIngress,
-} from "../remote-control-ui-context.js";
+} from "../ingress-attribution.js";
 import type { RemoteControlUiIngressContext } from "../server/client-identity-types.js";
 import { startWebSocketKeepalive } from "../websocket-keepalive.js";
 import type { DesktopAudioSource } from "./managed-linux-audio.js";
@@ -78,7 +78,6 @@ export function mintDesktopAudioObserver(params: {
           .finally(() => {
             transition = undefined;
           });
-        void ingress?.trackWork(transition);
       };
       const stopKeepalive = startWebSocketKeepalive(ws);
       const sendState = (state: "started" | "stopped" | "error", message?: string) => {

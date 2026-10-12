@@ -32,10 +32,6 @@ import { retireDeviceTokenClients } from "../../device-token-client-lifecycle.js
 import { normalizeNodeHostCompatibilityMetadata } from "../../node-legacy-protocol-filter.js";
 import { isScopelessNodePairingRequest } from "../../node-pairing-auto-approve.js";
 import { normalizeChromeExtensionOrigin } from "../../origin-check.js";
-import {
-  assertRemoteControlUiIngressCurrent,
-  getRemoteControlUiIngressContext,
-} from "../../remote-control-ui-context.js";
 import { formatForLog } from "../../ws-log.js";
 import { truncateCloseReason } from "../close-reason.js";
 import {
@@ -66,8 +62,6 @@ export async function authorizeGatewayConnectDevice(
   context: GatewayConnectPhaseContext,
   state: AuthenticatedGatewayConnect,
 ): Promise<DeviceAuthorizedGatewayConnect | undefined> {
-  const remoteIngress = getRemoteControlUiIngressContext(context.handler.upgradeReq);
-  const assertIngressCurrent = () => assertRemoteControlUiIngressCurrent(remoteIngress);
   const {
     connId,
     buildRequestContext,
@@ -261,9 +255,7 @@ export async function authorizeGatewayConnectDevice(
               }
             }
           : undefined,
-        assertIngressCurrent,
       );
-      assertIngressCurrent();
       const operatorApprovalScopes =
         pairing.request.isRepair !== true || plan.isSameKeyScopeUpgrade
           ? plan.autoApproveOperatorScopes
@@ -528,7 +520,7 @@ export async function authorizeGatewayConnectDevice(
 
     const paired = await getPairedDevice(device.id);
     const isPaired = paired?.publicKey === devicePublicKey;
-    if (paired && !isPaired && remoteIngress) {
+    if (paired && !isPaired && state.remoteIngressPrincipal) {
       failPairingHandshake({
         message:
           "Remote Control UI device key does not match the paired device; remove the stale device in Devices and reconnect with a fresh browser identity.",

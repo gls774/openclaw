@@ -15,12 +15,12 @@ import {
 } from "./control-ui-contract.js";
 import { controlUiPluginAssetPrefix } from "./control-ui-plugin-assets-contract.js";
 import type { ControlUiPluginTabAuthGrant } from "./control-ui-plugin-tabs.js";
-import { isLocalDirectRequest, isLoopbackHost, resolveHostName } from "./net.js";
-import { isOperatorScope, type OperatorScope } from "./operator-scopes.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
+} from "./ingress-attribution.js";
+import { isLocalDirectRequest, isLoopbackHost, resolveHostName } from "./net.js";
+import { isOperatorScope, type OperatorScope } from "./operator-scopes.js";
 import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 import { resolvePluginRoutePathContext } from "./server/plugins-http/path-context.js";
 

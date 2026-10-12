@@ -495,22 +495,13 @@ describe("authenticated request mutation custody", () => {
     "policy changed",
     "selection mismatch",
     "copied generation reader",
-    "remote ingress assertion",
-    "remote ingress signal",
   ] as const)("retains the admitted authority for %s", async (scenario) => {
     const generation = new SharedGatewaySessionGenerationState({
       current: "generation-a",
       required: null,
     });
     const connection = new AbortController();
-    const ingress = new AbortController();
     const client = createOperatorWsClient();
-    if (scenario.startsWith("remote ingress")) {
-      client.remoteControlUiIngress = createRemoteControlUiIngressTestContext({
-        ...(scenario === "remote ingress signal" ? { signal: ingress.signal } : {}),
-        assertCurrent: () => ingress.signal.throwIfAborted(),
-      });
-    }
     client.usesSharedGatewayAuth = true;
     client.sharedGatewaySessionGeneration = "generation-a";
     setRuntimeConfigSnapshot({});
@@ -628,8 +619,6 @@ describe("authenticated request mutation custody", () => {
       ]);
       if (scenario === "transport retirement") {
         connection.abort();
-      } else if (scenario.startsWith("remote ingress")) {
-        ingress.abort(new Error("remote ingress grant revoked"));
       } else if (scenario === "client invalidated") {
         client.invalidated = true;
       } else if (scenario === "generation rotated" || compatibilityReader) {

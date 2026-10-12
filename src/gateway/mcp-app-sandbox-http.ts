@@ -17,7 +17,7 @@ import { respondPlainText } from "./control-ui-http-utils.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
+} from "./ingress-attribution.js";
 
 type PublicResourceReader = NonNullable<
   PluginBoardWidgetContentKind["resources"]["readPublicResource"]

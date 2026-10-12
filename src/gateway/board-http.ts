@@ -13,7 +13,7 @@ import { sendMethodNotAllowed } from "./http-common.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
+} from "./ingress-attribution.js";
 import { prepareRemoteIngressSessionRead } from "./remote-ingress-session-read.js";
 import type { GatewayContextResolver } from "./server-methods/types.js";
 import { sessionObserverScopeKey } from "./session-observer-model.js";

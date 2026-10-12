@@ -26,16 +26,15 @@ vi.mock("./rfb-preauth.js", async (original) => ({
 import { handleDesktopAudioUpgrade, mintDesktopAudioObserver } from "./audio-bridge.js";
 import { handleDesktopObserveUpgrade, mintDesktopObserverToken } from "./observe-bridge.js";
 
-it("retains pending observer authentication until its actual work settles after ingress closure", async () => {
+it("rechecks ingress authority before publishing after observer authentication", async () => {
   const authentication = createDeferred();
   peers.authenticate.mockImplementation(() => authentication.promise);
-  const grant = new AbortController();
-  const work: Promise<unknown>[] = [];
+  let current = true;
   const context = createRemoteControlUiIngressTestContext({
-    signal: grant.signal,
-    trackWork(pending) {
-      work.push(pending);
-      return pending;
+    assertCurrent() {
+      if (!current) {
+        throw new Error("ingress revoked");
+      }
     },
   });
   const desktop = new PassThrough();
@@ -44,6 +43,7 @@ it("retains pending observer authentication until its actual work settles after 
     readyState: 1,
     resume: vi.fn(),
     pause: vi.fn(),
+    send: vi.fn(),
     close: vi.fn((code: number, reason: string) => {
       peer.readyState = 3;
       peer.emit("close", code, Buffer.from(reason));
@@ -68,21 +68,16 @@ it("retains pending observer authentication until its actual work settles after 
         registry: { claimStream: () => desktop, attachObserver: () => ({ release }) },
       }),
     ).toBe(true);
-    grant.abort();
-    let settled = false;
-    const drain = Promise.all(work).then(() => {
-      settled = true;
-    });
-    await Promise.resolve();
-    expect(settled).toBe(false);
+    current = false;
+    authentication.resolve();
+    await authentication.promise;
+    desktop.emit("data", Buffer.from("private desktop bytes"));
     expect(release).toHaveBeenCalledOnce();
     expect(peer.close).toHaveBeenCalledWith(4006, "authority_revoked");
-    authentication.resolve();
-    await drain;
-    expect(settled).toBe(true);
+    expect(peer.send).not.toHaveBeenCalled();
   } finally {
     authentication.resolve();
-    await Promise.all(work);
+    await authentication.promise;
     desktop.destroy();
     transport.destroy();
   }

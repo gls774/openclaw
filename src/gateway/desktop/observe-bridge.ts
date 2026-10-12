@@ -11,7 +11,7 @@ import { rejectWebSocketUpgrade } from "../../shared/websocket-upgrade-reject.js
 import {
   getRemoteControlUiIngressContext,
   hasCurrentRemoteControlUiIngress,
-} from "../remote-control-ui-context.js";
+} from "../ingress-attribution.js";
 import { startWebSocketKeepalive } from "../websocket-keepalive.js";
 import { connectRfbAttachment, type DesktopRfbAttachment } from "./attachment.js";
 import { mintDesktopAudioObserver } from "./audio-bridge.js";
@@ -357,7 +357,7 @@ export function handleDesktopObserveUpgrade(
 
     const preauth = entry.preauth;
     const browser = new WebSocketPreauthPeer(ws);
-    const preauthentication = (async () => {
+    void (async () => {
       try {
         await preauthenticateRfb({
           server: desktopSocket,
@@ -391,7 +391,6 @@ export function handleDesktopObserveUpgrade(
         );
       }
     })();
-    void ingress?.trackWork(preauthentication);
   });
   return true;
 }

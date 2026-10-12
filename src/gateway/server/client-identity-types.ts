@@ -37,7 +37,6 @@ export type RemoteControlUiIngressContext = Readonly<{
   frameAncestors: readonly string[];
   signal: AbortSignal;
   assertCurrent(): void;
-  trackWork<T>(work: Promise<T>): Promise<T>;
 }>;
 
 export type GatewayWsBrowserOrigin = {

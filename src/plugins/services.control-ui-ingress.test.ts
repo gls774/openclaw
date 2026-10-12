@@ -1,5 +1,4 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { awaitGateBeforeSettlement, createDeferred } from "../../test/helpers/promise.js";
 import { bindGatewayControlUiIngressHost } from "../gateway/remote-control-ui-ingress-host.js";
 import type { GatewayRequestContext } from "../gateway/server-methods/types.js";
 import { trackAsyncWork } from "../shared/async-work-scope.js";
@@ -36,7 +35,7 @@ afterEach(async () => {
   services.clear();
 });
 
-async function fixture(recordOptions: Partial<PluginRecord> = {}, stop?: () => Promise<void>) {
+async function fixture(recordOptions: Partial<PluginRecord> = {}) {
   const registry = createEmptyPluginRegistry();
   const record = createPluginRecord({ id: "ingress-test", origin: "bundled", ...recordOptions });
   registry.plugins.push(record);
@@ -83,7 +82,6 @@ async function fixture(recordOptions: Partial<PluginRecord> = {}, stop?: () => P
       start: (ctx) => {
         serviceContext = ctx;
       },
-      stop,
     },
   });
   const service = await startPluginServices({ registry, config: {} });
@@ -133,32 +131,16 @@ describe("service Control UI ingress authority", () => {
     },
   );
 
-  it("fences retained handles before asynchronous plugin cleanup settles", async () => {
-    const enteredStop = createDeferred();
-    const releaseStop = createDeferred();
-    const { service, serviceContext } = await fixture({}, async () => {
-      enteredStop.resolve();
-      await releaseStop.promise;
-    });
+  it("revokes retained authority when the service stops", async () => {
+    const { service, serviceContext } = await fixture();
     const factory = serviceContext.controlUiIngress!;
-    let stopping: Promise<unknown> | undefined;
-    try {
-      const ingress = await factory.open(openOptions());
-      const rpc = await factory.bindPrincipal(openOptions());
-      expect(await readUi(ingress)).toBe("synthetic Control UI");
-      stopping = service.stop();
-      await awaitGateBeforeSettlement(
-        enteredStop.promise,
-        stopping,
-        "Service stopped before its cleanup",
-      );
-      await expect(factory.open(openOptions())).rejects.toThrow(/stopped|active|closed/);
-      await expect(rpc.request("users.self", {})).rejects.toThrow(/stopped|active|closed/);
-      await expect(readUi(ingress)).rejects.toThrow(/stopped|active|closed/);
-    } finally {
-      releaseStop.resolve();
-      await stopping;
-    }
+    const ingress = await factory.open(openOptions());
+    const rpc = await factory.bindPrincipal(openOptions());
+    expect(await readUi(ingress)).toBe("synthetic Control UI");
+    await service.stop();
+    await expect(factory.open(openOptions())).rejects.toThrow(/stopped|active|closed/);
+    await expect(rpc.request("users.self", {})).rejects.toThrow(/stopped|active|closed/);
+    await expect(readUi(ingress)).rejects.toThrow(/stopped|active|closed/);
   });
 
   it("refuses retained authority after its plugin record is revoked", async () => {

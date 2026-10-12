@@ -114,6 +114,31 @@ export function readGatewayIngressTransport(
   return requestTransport.get(req);
 }
 
+export function getRemoteControlUiIngressContext(
+  req: IncomingMessage,
+): RemoteControlUiIngressContext | undefined {
+  const transport = readGatewayIngressTransport(req);
+  return transport?.kind === "remote-forwarded" ? transport.context : undefined;
+}
+
+export function assertRemoteControlUiIngressCurrent(
+  context: RemoteControlUiIngressContext | undefined,
+): void {
+  context?.signal.throwIfAborted();
+  context?.assertCurrent();
+}
+
+export function hasCurrentRemoteControlUiIngress(
+  context: RemoteControlUiIngressContext | undefined,
+): boolean {
+  try {
+    assertRemoteControlUiIngressCurrent(context);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function unattributableProxy(remoteAddress: string): GatewayIngressAttribution {
   return {
     kind: "unattributable-proxy",

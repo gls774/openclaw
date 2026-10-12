@@ -84,7 +84,7 @@ import { authorizeControlUiReadRequestOrReply } from "./http-utils.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
+} from "./ingress-attribution.js";
 import { readControlUiRootAsset, type ControlUiRootState } from "./server-control-ui-root.js";
 import { isTerminalConfigEnabled } from "./terminal/enabled.js";
 

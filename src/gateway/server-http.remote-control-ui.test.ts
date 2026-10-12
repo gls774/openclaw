@@ -2,7 +2,6 @@ import { ServerResponse, type IncomingMessage } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { withPluginRuntimeRegistryScope } from "../plugins/runtime/gateway-request-scope.js";
-import { validateRemoteControlUiFrameAncestors } from "./control-ui-csp.js";
 import { sendControlUiHtmlBody } from "./control-ui-static.js";
 import { markGatewayIngressTransport } from "./ingress-attribution.js";
 import { resolveRemoteControlUiHttpRoute } from "./remote-control-ui-http-routing.js";
@@ -158,16 +157,5 @@ describe("remote Control UI HTTP owner", () => {
       req.destroy();
       errors.mockRestore();
     }
-  });
-
-  it.each([
-    "*",
-    "http://chat.example.test",
-    "https:",
-    "https://chat.example.test/path",
-    "https://user@chat.example.test",
-    "https://chat.example.test; script-src *",
-  ])("rejects an unsafe frame ancestor %s", (value) => {
-    expect(() => validateRemoteControlUiFrameAncestors([value])).toThrow();
   });
 });

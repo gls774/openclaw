@@ -6,7 +6,7 @@ import { isReadHttpMethod, respondNotFound } from "./control-ui-http-utils.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
+} from "./ingress-attribution.js";
 
 /** This namespace contains only public preview documents and their static card. */
 export function isControlUiSharePath(pathname: string, basePath: string): boolean {

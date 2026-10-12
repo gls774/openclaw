@@ -40,7 +40,6 @@ export function createRemoteControlUiIngressTestContext(
     frameAncestors: ["https://host.example.test", "codex-sandbox:"],
     signal: new AbortController().signal,
     assertCurrent() {},
-    trackWork: <T>(work: Promise<T>) => work,
     ...overrides,
   };
   return Object.freeze(context);

@@ -13,7 +13,11 @@ import { logRejectedLargePayload } from "../../logging/diagnostic-payload.js";
 import { removeRemoteNodeInfo } from "../../skills/runtime/remote.js";
 import { isWebchatClient } from "../../utils/message-channel.js";
 import { getHeader } from "../http-header-value.js";
-import type { GatewayIngressAttribution } from "../ingress-attribution.js";
+import {
+  getRemoteControlUiIngressContext,
+  hasCurrentRemoteControlUiIngress,
+  type GatewayIngressAttribution,
+} from "../ingress-attribution.js";
 import { isLoopbackAddress } from "../net.js";
 import { clearNodeWakeState } from "../node-wake-state.js";
 import {
@@ -21,10 +25,6 @@ import {
   reconcileClientPluginNodeCapabilities,
   type PluginNodeCapabilitySurface,
 } from "../plugin-node-capability.js";
-import {
-  getRemoteControlUiIngressContext,
-  hasCurrentRemoteControlUiIngress,
-} from "../remote-control-ui-context.js";
 import { serializeGatewayFrame } from "../serialized-json.js";
 import { MAX_BUFFERED_BYTES, WEBSOCKET_OPEN_READY_STATE } from "../server-constants.js";
 import type { GatewayRequestContext } from "../server-methods/types.js";
@@ -497,14 +497,13 @@ export function attachGatewayConnection(params: AttachGatewayConnectionParams) {
     connectionController.abort();
     // ws removes its client synchronously; the Gateway retains this connection
     // until asynchronous node history and other close cleanup have settled.
-    const cleanup = connectionWork
+    void connectionWork
       .trackCleanup(() => handleSocketClose(code, reason))
       .catch((error: unknown) => {
         logGateway.error(`websocket close cleanup failed conn=${connId}: ${formatError(error)}`);
         retireConnection();
       })
       .finally(releaseConnection);
-    void remoteIngress?.trackWork(cleanup);
   });
 
   const setClient = (next: GatewayWsClient) => {

@@ -13,13 +13,13 @@ import { respondNotFound } from "./control-ui-http-utils.js";
 import { resolveByteResponse, writeByteHeaders } from "./http-byte-range.js";
 import { sendMethodNotAllowed } from "./http-common.js";
 import {
+  getRemoteControlUiIngressContext,
+  assertRemoteControlUiIngressCurrent,
+} from "./ingress-attribution.js";
+import {
   encodeImageThumbnail,
   resolveManagedImageThumbnail,
 } from "./managed-image-thumbnail-cache.js";
-import {
-  getRemoteControlUiIngressContext,
-  assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
 import type { GatewayClient } from "./server-methods/types.js";
 
 /** The RPC chooses and authorizes the resource; HTTP never accepts a replacement query. */

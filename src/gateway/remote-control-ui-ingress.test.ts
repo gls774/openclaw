@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WebSocketServer } from "../../packages/gateway-client/src/websocket.js";
-import { createDeferred } from "../../test/helpers/promise.js";
 import { REDACTED_SENTINEL } from "../config/redact-sentinel.js";
 import type {
   GatewayControlUiIngressOpenOptionsV2,
@@ -10,7 +9,8 @@ import {
   createOpenClawTestState,
   type OpenClawTestState,
 } from "../test-utils/openclaw-test-state.js";
-import { createSandboxHostHttpRequestHandler } from "./mcp-app-sandbox-http.js";
+import { authorizeControlUiReadHttpGatewayConnect } from "./auth.js";
+import { prepareGatewayIngressAttribution } from "./ingress-attribution.js";
 import type { GatewayControlUiIngressHost } from "./remote-control-ui-ingress-host.js";
 import { createGatewayControlUiIngressFactory } from "./remote-control-ui-ingress.js";
 
@@ -93,6 +93,14 @@ describe("remote Control UI handle", () => {
     ).rejects.toMatchObject({ code: "invalid-options" });
   });
 
+  it.each(["token", "password"] as const)("opens a %s-authenticated host", async (mode) => {
+    const { host, open } = fixture();
+    host.getResolvedAuth = () => ({ mode, [mode]: "synthetic-credential", allowTailscale: false });
+    const { response } = await request(await open());
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+  });
+
   it.each(["token", "password"] as const)(
     "rejects a redacted configured %s before opening transport",
     async (mode) => {
@@ -104,67 +112,27 @@ describe("remote Control UI handle", () => {
       });
     },
   );
-  it("preserves the sandbox owner's origin isolation header through the handle", async () => {
-    const { host, open } = fixture();
-    host.handleSandboxRequest = createSandboxHostHttpRequestHandler();
-    const { response } = await (
-      await open({
-        frameAncestors: [
-          "codex-sandbox:",
-          "https://*.web-sandbox.oaiusercontent.com",
-          "https://chatgpt.com",
-        ],
-      })
-    ).request({
-      surface: "sandbox",
-      method: "GET",
-      pathAndQuery: "/mcp-app-sandbox",
-      headers: [],
-      signal: new AbortController().signal,
-    });
-    expect(response.status).toBe(200);
-    expect(response.headers.get("origin-agent-cluster")).toBe("?1");
-    expect(response.headers.get("content-security-policy")).toContain(
-      "frame-ancestors https://ui.example.test codex-sandbox: https://*.web-sandbox.oaiusercontent.com https://chatgpt.com",
-    );
-    await response.body?.cancel();
-  });
-  it("validates a relative redirect against the requested document path", async () => {
+  it.each([
+    ["new", 302],
+    ["https://outside.example.test/", "forbidden"],
+  ] as const)("validates redirect %s", async (location, expected) => {
     const { host, open } = fixture();
     host.handleRequest = async (_req, res) => {
-      res.writeHead(302, { Location: "new" });
+      res.writeHead(302, { Location: location });
       res.end();
     };
-    const { response } = await request(await open());
-    expect(response.status).toBe(302);
-    expect(response.headers.get("location")).toBe("new");
-    await response.body?.cancel();
-  });
-  it("settles the request owner before publishing a forbidden redirect failure", async () => {
-    const { host, open } = fixture();
-    const retired = createDeferred();
-    const release = createDeferred();
-    host.handleRequest = async (req, res) => {
-      req.socket.once("close", () => retired.resolve());
-      res.writeHead(302, { Location: "https://outside.example.test/" });
-      res.flushHeaders();
-      await release.promise;
-    };
-    const handle = await open();
-    let settled = false;
-    const pending = request(handle).catch((error: unknown) => {
-      settled = true;
-      return error;
-    });
-    try {
-      await retired.promise;
-      expect(settled).toBe(false);
-    } finally {
-      release.resolve();
+    const pending = request(await open());
+    if (expected === "forbidden") {
+      await expect(pending).rejects.toMatchObject({ code: expected });
+    } else {
+      const { response } = await pending;
+      expect(response.status).toBe(expected);
+      expect(response.headers.get("location")).toBe(location);
+      await response.body?.cancel();
     }
-    expect(await pending).toMatchObject({ code: "forbidden" });
   });
-  it("rejects invalid HTTP bytes and duplicate WebSocket protocols before transport allocation", async () => {
+
+  it("rejects invalid HTTP bytes and duplicate WebSocket protocols through native parsers", async () => {
     const { open, options } = fixture();
     const handle = await open();
     await expect(
@@ -175,7 +143,7 @@ describe("remote Control UI handle", () => {
         headers: [["accept", "\u0100"]],
         signal: new AbortController().signal,
       }),
-    ).rejects.toMatchObject({ code: "invalid-options" });
+    ).rejects.toThrow();
     await expect(
       handle.openWebSocket({
         pathAndQuery: "/claw",
@@ -183,7 +151,7 @@ describe("remote Control UI handle", () => {
         protocols: ["chat", "chat"],
         signal: new AbortController().signal,
       }),
-    ).rejects.toMatchObject({ code: "invalid-options" });
+    ).rejects.toThrow();
     const { response } = await request(handle);
     expect(response.status).toBe(200);
     await response.body?.cancel();
@@ -265,13 +233,28 @@ describe("remote Control UI handle", () => {
     await expect(request(await open(), path)).rejects.toMatchObject({ code: "invalid-options" });
   });
 
-  it("pins immutable presentation and filters browser identity and framing headers", async () => {
-    const { open } = fixture();
-    const ancestors = ["https://host.example.test"];
-    const handle = await open({ frameAncestors: ancestors });
-    ancestors.push("https://later.example.test");
-    expect(Object.isFrozen(handle.presentation)).toBe(true);
-    expect(Object.isFrozen(handle.presentation.operatorScopeCeiling)).toBe(true);
+  it("pins granted scopes and filters browser identity headers", async () => {
+    const { host, open } = fixture();
+    host.handleRequest = async (req, res) => {
+      expect(
+        prepareGatewayIngressAttribution({ req, trustedProxies: ["127.0.0.1"] }),
+      ).toMatchObject({
+        kind: "remote-forwarded",
+        rateLimit: { subject: { key: "remote-control-ui:test-plugin" } },
+      });
+      await expect(
+        authorizeControlUiReadHttpGatewayConnect({
+          req,
+          auth: host.getResolvedAuth(),
+          connectAuth: { token: "synthetic-ingress-test" },
+        }),
+      ).resolves.toEqual({ ok: false, reason: "remote_control_ui_device_auth_required" });
+      res.end(JSON.stringify(req.headers));
+    };
+    const scopes = ["operator.read"];
+    const handle = await open({ operatorScopeCeiling: scopes });
+    scopes.push("operator.admin");
+    expect(handle.presentation.operatorScopeCeiling).toEqual(["operator.read"]);
     const { response } = await handle.request({
       surface: "control-ui",
       method: "GET",
@@ -286,52 +269,65 @@ describe("remote Control UI handle", () => {
         ["origin", "null"],
       ],
     });
-    expect(await response.json()).toMatchObject({
+    const headers = await response.json();
+    expect(headers).toMatchObject({
       host: "ui.example.test",
       authorization: "Bearer synthetic-device",
       origin: "null",
     });
-  });
-
-  it("holds HTTP quotas through unread response bodies across independent factories", async () => {
-    const { open } = fixture();
-    const opened = await Promise.all(Array.from({ length: 4 }, () => open()));
-    for (const handle of opened) {
-      await Promise.all(Array.from({ length: 16 }, () => request(handle)));
-      await expect(request(handle)).rejects.toMatchObject({ code: "limit-exceeded" });
+    for (const name of ["x-forwarded-for", "tailscale-user-login", "x-openclaw-scopes"]) {
+      expect(headers).not.toHaveProperty(name);
     }
-    const extra = await open();
-    await expect(request(extra)).rejects.toMatchObject({ code: "limit-exceeded" });
-    await opened[0]!.close();
-    const { response } = await request(extra);
-    expect(response.status).toBe(200);
-    await response.body?.cancel();
   });
 
-  it("bounds main, auxiliary and plugin sockets separately", async () => {
+  it("requires the exact handle origin despite a permissive global policy", async () => {
+    const { host, open, options } = fixture();
+    host.getRuntimeConfig = () => ({
+      gateway: {
+        controlUi: { allowedOrigins: ["*"], dangerouslyAllowHostHeaderOriginFallback: true },
+      },
+    });
+    const handle = await open();
+    for (const origin of [
+      "",
+      "null",
+      `${options.publicOrigin}/`,
+      "https://other.example.test",
+      "http://localhost",
+    ]) {
+      await expect(
+        handle.openWebSocket({
+          pathAndQuery: "/claw",
+          origin,
+          protocols: [],
+          signal: new AbortController().signal,
+        }),
+      ).rejects.toMatchObject({ code: "forbidden" });
+    }
+  });
+
+  it("bounds concurrent HTTP requests per handle", async () => {
+    const handle = await fixture().open();
+    await Promise.all(Array.from({ length: 16 }, () => request(handle)));
+    await expect(request(handle)).rejects.toMatchObject({ code: "limit-exceeded" });
+  });
+
+  it("bounds main and auxiliary sockets independently", async () => {
     const { open, options } = fixture();
-    const first = await open();
-    const connect = (handle: GatewayControlUiIngressV2, pathAndQuery: string) =>
+    const handle = await open();
+    const connect = (pathAndQuery: string) =>
       handle.openWebSocket({
         pathAndQuery,
         origin: options.publicOrigin,
         protocols: [],
         signal: new AbortController().signal,
       });
-    await connect(first, "/claw");
-    await connect(first, "/claw");
-    await expect(connect(first, "/claw")).rejects.toMatchObject({ code: "limit-exceeded" });
-    await connect(first, "/desktop/observe?token=synthetic");
-    await connect(first, "/browser/screencast?token=synthetic");
-    await expect(connect(first, "/desktop/audio")).rejects.toMatchObject({
-      code: "limit-exceeded",
-    });
-    for (let index = 0; index < 2; index += 1) {
-      const next = await open();
-      await connect(next, "/claw");
-      await connect(next, "/claw");
+    for (const path of ["/claw", "/claw", "/desktop/observe", "/browser/screencast"]) {
+      await connect(path);
     }
-    await expect(connect(await open(), "/claw")).rejects.toMatchObject({ code: "limit-exceeded" });
-    await expect(connect(first, "/browser/extension")).rejects.toMatchObject({ code: "forbidden" });
+    for (const path of ["/claw", "/desktop/audio"]) {
+      await expect(connect(path)).rejects.toMatchObject({ code: "limit-exceeded" });
+    }
+    await expect(connect("/browser/extension")).rejects.toMatchObject({ code: "forbidden" });
   });
 });

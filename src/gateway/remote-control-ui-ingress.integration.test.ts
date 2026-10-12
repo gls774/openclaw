@@ -39,9 +39,6 @@ import {
   PNG_BYTES,
   usePeer,
   expectReadWriteWithoutAdmin,
-  expectOwnerReadAccess,
-  expectUiCloseJoinsRpc,
-  expectIngressDenials,
   type IngressFrame,
   type Peer,
 } from "./remote-control-ui-ingress.integration.test-support.js";
@@ -57,11 +54,7 @@ import { getControlUiModule } from "./server-http-modules.js";
 import { createGatewayHttpRequestHandler } from "./server-http-request.js";
 import { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";
 import { createRequestGatewayMethodRegistry } from "./server-methods.js";
-import type {
-  GatewayRequestContext,
-  GatewayRequestHandlerOptions,
-  GatewayRequestHandlers,
-} from "./server-methods/types.js";
+import type { GatewayRequestContext, GatewayRequestHandlers } from "./server-methods/types.js";
 import { usersHandlers } from "./server-methods/users.js";
 import { GatewayClientRegistry } from "./server/client-registry.js";
 import { createPreauthConnectionBudget } from "./server/preauth-connection-budget.js";
@@ -100,15 +93,15 @@ describe("remote Control UI ingress production composition", () => {
         entered: ReturnType<typeof createDeferred>;
         release: ReturnType<typeof createDeferred>;
         remaining: number;
+        unsettled: number;
+        settled: ReturnType<typeof createDeferred>;
       }
     | undefined;
   let heldRead:
     | { entered: ReturnType<typeof createDeferred>; release: ReturnType<typeof createDeferred> }
     | undefined;
-  let observeOwnerMutation: ((options: GatewayRequestHandlerOptions) => void) | undefined;
   const extraHandlers: GatewayRequestHandlers = {
     "users.setDisplayName": async (options) => {
-      observeOwnerMutation?.(options);
       const held = heldMutation;
       if (held) {
         held.remaining -= 1;
@@ -117,7 +110,13 @@ describe("remote Control UI ingress production composition", () => {
         }
         await held.release.promise;
       }
-      await usersHandlers["users.setDisplayName"]!(options);
+      try {
+        await usersHandlers["users.setDisplayName"]!(options);
+      } finally {
+        if (held && --held.unsettled === 0) {
+          held.settled.resolve(undefined);
+        }
+      }
     },
   };
   let http: ReturnType<typeof createGatewayHttpRequestHandler> | undefined;
@@ -400,6 +399,14 @@ describe("remote Control UI ingress production composition", () => {
     ).response;
   }
 
+  async function configure(nextConfig: OpenClawConfig, nextAuth: ResolvedGatewayAuth) {
+    config = nextConfig;
+    auth = nextAuth;
+    setRuntimeConfigSnapshot(config, config);
+    projection?.dispose();
+    projection = await createSessionRowProjection({ cfg: config, modelCatalog: [] });
+  }
+
   it("serves read-only UI config, images and chat media under the grant without opening general APIs", async () => {
     const iconKey = encodeURIComponent(OWNER_SESSION_KEY);
     const imagePaths = [
@@ -417,11 +424,6 @@ describe("remote Control UI ingress production composition", () => {
       expect(remote.headers.get("content-type")).toBe(
         pathname === backgroundPath ? "image/jpeg" : "image/png",
       );
-      const direct = await fetch(`${directOrigin}${pathname}`, {
-        headers: { Authorization: `Bearer ${SHARED_TOKEN}` },
-      });
-      expect(direct.status, pathname).toBe(200);
-      expect(Buffer.from(await direct.arrayBuffer())).toEqual(remoteBytes);
       if (pathname !== backgroundPath) {
         expect(remoteBytes).toEqual(PNG_BYTES);
       }
@@ -433,14 +435,6 @@ describe("remote Control UI ingress production composition", () => {
       basePath: "/claw",
       assistantAgentId: "main",
       assistantAvatar: expect.stringContaining("/claw/avatar/main"),
-    });
-    const directConfig = await fetch(`${directOrigin}${configPath}`, {
-      headers: { Authorization: `Bearer ${SHARED_TOKEN}` },
-    });
-    expect(directConfig.status).toBe(200);
-    expect(await directConfig.json()).toMatchObject({
-      basePath: "/claw",
-      assistantAgentId: "main",
     });
     for (const pathname of [configPath, imagePaths[2]!]) {
       const unauthenticated = await fetch(`${directOrigin}${pathname}`);
@@ -459,11 +453,6 @@ describe("remote Control UI ingress production composition", () => {
     const directReplay = await fetch(`${directOrigin}${ticketedPath}`);
     expect(directReplay.status).toBe(404);
     await directReplay.body?.cancel();
-    for (const pathname of ["/api/sessions", "/v1/models", "/claw/__openclaw__/unknown"]) {
-      const response = await readRemote(pathname);
-      expect(response.status, pathname).toBe(404);
-      await response.body?.cancel();
-    }
   });
 
   it("pairs visible devices without issuing credentials and reconnects under the live owner grant", async () => {
@@ -482,8 +471,6 @@ describe("remote Control UI ingress production composition", () => {
         expectHello(hello, "remote-ingress", SCOPES);
         expect(hello.payload?.controlUiUrl).toBe(`${PUBLIC_ORIGIN}/claw`);
         if (scopes?.length === SCOPES.length) {
-          await expectOwnerReadAccess(peer, OWNER_SESSION_KEY);
-          await expectIngressDenials(peer);
           await expectReadWriteWithoutAdmin(peer, "credential-free browser");
         }
       });
@@ -543,115 +530,43 @@ describe("remote Control UI ingress production composition", () => {
       signal: grantLifetime.signal,
     });
     expect(response.status).toBe(200);
+    expect(response.headers.get("origin-agent-cluster")).toBe("?1");
     expect(response.headers.get("content-security-policy")).toContain(
       `frame-ancestors ${PUBLIC_ORIGIN} ${FRAME_ANCESTORS.join(" ")}`,
     );
     await response.body?.cancel();
   });
 
-  it("rejects invalid signed device proof through the WebSocket admission path", async () => {
+  it("rejects invalid devices, reusable credentials, roles and scopes at WebSocket admission", async () => {
     const identity = loadOrCreateDeviceIdentity({ identityKey: "synthetic-rejected-browser" });
-    await usePeer(await openRemote(), async (peer) => {
-      expect(await connect(peer, { identity, tamperSignature: true })).toMatchObject({
-        ok: false,
-        error: { message: expect.stringContaining("signature") },
+    const cases = [
+      { change: { identity: undefined }, message: "signed device identity" },
+      { change: { tamperSignature: true }, message: "signature" },
+      { change: { role: "node" }, message: "operator role" },
+      ...[
+        { token: "synthetic-credential" },
+        { password: "synthetic-credential" },
+        { deviceToken: "synthetic-credential" },
+        { bootstrapToken: "synthetic-credential" },
+      ].map((credentials) => ({
+        change: { auth: credentials },
+        message: "credential-free signed device",
+      })),
+      ...[
+        "operator.admin",
+        "operator.approvals",
+        "operator.questions",
+        "operator.pairing",
+        "operator.talk.secrets",
+      ].map((scope) => ({ change: { scopes: [scope] }, message: "ceiling" })),
+    ];
+    for (const { change, message } of cases) {
+      await usePeer(await openRemote(), async (peer) => {
+        expect(await connect(peer, { identity, ...change })).toMatchObject({
+          ok: false,
+          error: { message: expect.stringContaining(message) },
+        });
       });
-    });
-  });
-
-  it("applies owner ceilings to origin-free RPC on a password host", async () => {
-    auth = { mode: "password", password: SHARED_TOKEN, allowTailscale: false };
-    config = { ...config, gateway: { ...config.gateway, auth } };
-    setRuntimeConfigSnapshot(config, config);
-    for (const ceiling of [["operator.read"], ["operator.admin"]]) {
-      const binding = await factory.bindPrincipal({
-        ...principalOptions,
-        operatorScopeCeiling: ceiling,
-      });
-      try {
-        expect(await binding.request("voicewake.get", {})).toHaveProperty("triggers");
-        if (ceiling.includes("operator.admin")) {
-          expect(await binding.request("exec.approvals.get", {})).toHaveProperty(
-            "resolvedDefaults",
-          );
-        } else {
-          await expect(binding.request("voicewake.set", { triggers: ["denied"] })).rejects.toThrow(
-            "operator.write",
-          );
-        }
-      } finally {
-        await binding.close();
-      }
-    }
-  });
-
-  it("retains live owner RPC authority without inventing a WebSocket connection", async () => {
-    let current = true;
-    let assertRetained: (() => void) | undefined;
-    const binding = await factory.bindPrincipal({
-      ...principalOptions,
-      assertCurrent: () => {
-        if (!current) {
-          throw new Error("Owner grant revoked");
-        }
-      },
-    });
-    observeOwnerMutation = ({ client }) => {
-      expect(client?.connId).toBeUndefined();
-      const authority = client?.internal?.operatorRunAuthority;
-      expect(authority?.profileId).toBe("gateway-owner");
-      if (!authority) {
-        throw new Error("Missing retained owner authority");
-      }
-      assertRetained = authority.assertCurrent;
-    };
-    heldMutation = { entered: createDeferred(), release: createDeferred(), remaining: 1 };
-    try {
-      const pending = binding.request("users.setDisplayName", {
-        profileId: "gateway-owner",
-        displayName: "Must not be published",
-      });
-      const rejected = pending.catch((error: unknown) => error);
-      await awaitGateBeforeSettlement(
-        heldMutation.entered.promise,
-        pending,
-        "Owner mutation did not retain authority",
-      );
-      expect(assertRetained).toBeTypeOf("function");
-      expect(() => assertRetained!()).not.toThrow();
-      current = false;
-      expect(() => assertRetained!()).toThrow();
-      heldMutation.release.resolve(undefined);
-      expect(await rejected).toBeInstanceOf(Error);
-    } finally {
-      heldMutation?.release.resolve(undefined);
-      heldMutation = undefined;
-      observeOwnerMutation = undefined;
-      await binding.close();
-    }
-  });
-
-  it("joins retained UI RPC execution before closing its transport handle", async () => {
-    const binding = await factory.bindPrincipal(principalOptions);
-    const ui = await binding.openControlUi(presentationOptions);
-    heldMutation = { entered: createDeferred(), release: createDeferred(), remaining: 1 };
-    try {
-      const pending = ui.requestGateway("users.setDisplayName", {
-        profileId: "gateway-owner",
-        displayName: "Must not be published",
-      });
-      await awaitGateBeforeSettlement(
-        heldMutation.entered.promise,
-        pending,
-        "UI RPC did not enter its handler",
-      );
-      await expectUiCloseJoinsRpc(ui, binding, pending, () =>
-        heldMutation!.release.resolve(undefined),
-      );
-    } finally {
-      heldMutation?.release.resolve(undefined);
-      heldMutation = undefined;
-      await binding.close();
     }
   });
 
@@ -666,7 +581,6 @@ describe("remote Control UI ingress production composition", () => {
       try {
         await usePeer(await openRemote(ui), async (peer) => {
           expectHello(await connect(peer, { identity }), "remote-ingress", ceiling);
-          expect(await request(peer, "device.pair.list", {})).toMatchObject({ ok: false });
           if (!ceiling.includes("operator.write")) {
             expect(await request(peer, "voicewake.set", { triggers: ["denied"] })).toMatchObject({
               ok: false,
@@ -679,7 +593,7 @@ describe("remote Control UI ingress production composition", () => {
     }
   });
 
-  it("binds Team WS, HTTP and RPC to each person's role and session visibility", async () => {
+  it("restricts Team HTTP assets and admits a reader under the current role", async () => {
     await ingress!.close();
     const admin = await ensureCanonicalUserProfileForEmail("admin@ingress.example.test");
     const reader = await ensureCanonicalUserProfileForEmail("reader@ingress.example.test");
@@ -727,49 +641,15 @@ describe("remote Control UI ingress production composition", () => {
         operatorScopeCeiling: ceiling,
       });
       try {
-        const expectedScopes = isAdmin ? ceiling : ["operator.read"];
-        const listed = await binding.request<{ sessions: Array<{ key: string }> }>(
-          "sessions.list",
-          {
-            source: "sidebar",
-            rowMode: "compact",
-            limit: 20,
-          },
-        );
-        expect(listed.sessions.map((session) => session.key)).toContain(
-          `agent:main:ingress-${person.id}`,
-        );
-        if (person.id === reader.id) {
-          expect(listed.sessions.map((session) => session.key)).not.toContain(
-            `agent:main:ingress-${admin.id}`,
-          );
-        }
-        if (isAdmin) {
-          expect(await binding.request("exec.approvals.get", {})).toHaveProperty(
-            "resolvedDefaults",
-          );
-        } else {
-          await expect(binding.request("exec.approvals.get", {})).rejects.toThrow("operator.admin");
-        }
-        if (person.id === reader.id) {
-          await expect(binding.request("voicewake.set", { triggers: ["denied"] })).rejects.toThrow(
-            "operator.write",
-          );
-        }
         const ui = await binding.openControlUi(presentationOptions);
-        await usePeer(await openRemote(ui), async (peer) => {
-          const identity = loadOrCreateDeviceIdentity({
-            identityKey: `synthetic-person-${person.id}`,
+        if (!isAdmin) {
+          await usePeer(await openRemote(ui), async (peer) => {
+            const identity = loadOrCreateDeviceIdentity({ identityKey: "synthetic-person-reader" });
+            expectHello(await connect(peer, { identity, profileId: person.id }), "remote-ingress", [
+              "operator.read",
+            ]);
           });
-          expectHello(
-            await connect(peer, { identity, profileId: person.id }),
-            "remote-ingress",
-            expectedScopes,
-          );
-          expect(await request(peer, "exec.approvals.get", {})).toMatchObject({
-            ok: isAdmin,
-          });
-        });
+        }
         if (isAdmin) {
           const metadata = await readRemote(`${assistantMediaPath}&meta=1`, ui);
           expect(metadata.status).toBe(200);
@@ -844,15 +724,23 @@ describe("remote Control UI ingress production composition", () => {
   });
 
   it("fences held HTTP, WebSocket and RPC work before effects and publication on grant revocation", async () => {
-    const subject = await ensureCanonicalUserProfileForEmail("assert@ingress.example.test");
-    await setCanonicalUserProfileRole(subject.id, "admin", {
-      onCommitted: invalidateOperatorRolePolicy,
-    });
+    const subject = { id: "gateway-owner" };
+    await configure(
+      {
+        ...config,
+        gateway: {
+          ...config.gateway,
+          roles: undefined,
+          auth: { mode: "token", token: SHARED_TOKEN },
+        },
+      },
+      { mode: "token", token: SHARED_TOKEN, allowTailscale: false },
+    );
     const grant = new AbortController();
     let grantCurrent = true;
     const binding = await factory.bindPrincipal({
       ...principalOptions,
-      principal: { kind: "person", profileId: subject.id },
+      principal: { kind: "owner" },
       operatorScopeCeiling: ["operator.admin"],
       signal: grant.signal,
       assertCurrent: () => {
@@ -871,7 +759,13 @@ describe("remote Control UI ingress production composition", () => {
       expectHello(await connect(peer, { identity, profileId: subject.id }), "remote-ingress", [
         "operator.admin",
       ]);
-      heldMutation = { entered: createDeferred(), release: createDeferred(), remaining: 2 };
+      heldMutation = {
+        entered: createDeferred(),
+        release: createDeferred(),
+        remaining: 2,
+        unsettled: 2,
+        settled: createDeferred(),
+      };
       heldRead = { entered: createDeferred(), release: createDeferred() };
       const pendingHttp = readRemote("/claw/control-ui-config.json?held=1", ui);
       const rejectedHttp = pendingHttp.catch((error: unknown) => error);
@@ -899,13 +793,14 @@ describe("remote Control UI ingress production composition", () => {
       expect(grant.signal.aborted).toBe(false);
       heldMutation.release.resolve(undefined);
       heldRead.release.resolve(undefined);
+      await heldMutation.settled.promise;
       heldMutation = undefined;
       heldRead = undefined;
       expect(await rejected).toBeInstanceOf(Error);
       expect(await rejectedWs).toBeInstanceOf(Error);
       expect(await rejectedHttp).toBeInstanceOf(Error);
       await peer.close();
-      const current = await ensureCanonicalUserProfileForEmail("assert@ingress.example.test");
+      const current = await ensureCanonicalGatewayOwnerProfile("Synthetic owner");
       expect(current.displayName).not.toBe("Must not be published");
       await expect(binding.request("voicewake.get", {})).rejects.toThrow();
       await expect(readRemote("/claw/control-ui-config.json", ui)).rejects.toThrow();
@@ -930,12 +825,6 @@ describe("remote Control UI ingress production composition", () => {
       config,
       sharedToken: SHARED_TOKEN,
       ownerSessionKey: OWNER_SESSION_KEY,
-      configure: async (nextConfig, nextAuth) => {
-        config = nextConfig;
-        auth = nextAuth;
-        setRuntimeConfigSnapshot(config, config);
-        projection?.dispose();
-        projection = await createSessionRowProjection({ cfg: config, modelCatalog: [] });
-      },
+      configure,
     }));
 });

@@ -20,14 +20,14 @@ import type { ResolvedGatewayAuth } from "./auth.js";
 import { sendUnauthorized } from "./http-common.js";
 import { sendGatewayHttpAuthFailure } from "./http-operator-access.js";
 import {
+  getRemoteControlUiIngressContext,
+  assertRemoteControlUiIngressCurrent,
+} from "./ingress-attribution.js";
+import {
   GatewayOperatorAccessDeniedError,
   hasCurrentGatewayOperatorAccess,
 } from "./operator-access-policy.js";
 import { readOperatorRolePolicyRevision } from "./operator-role-policy.js";
-import {
-  getRemoteControlUiIngressContext,
-  assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import { resolveSharedGatewaySessionGeneration } from "./server/ws-shared-generation.js";
 

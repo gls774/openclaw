@@ -40,9 +40,6 @@ export function createPluginServiceControlUiIngress(options: {
     getGatewayContextLifetime(gatewayOwner).signal,
     ...(instance ? [instance.lifecycle.signal] : []),
   ]);
-  const handles = new Set<{ close(): Promise<void> }>();
-  const opening = new Set<Promise<unknown>>();
-  let stopping: Promise<void> | undefined;
   const assertCurrent = () => {
     signal.throwIfAborted();
     lease.assertActive("Control UI ingress");
@@ -58,61 +55,26 @@ export function createPluginServiceControlUiIngress(options: {
       );
     }
   };
-  const stop = () => {
-    if (!stopping) {
-      lifetime.abort(
-        new GatewayControlUiIngressError("closed", "Plugin Control UI ingress stopped"),
-      );
-      stopping = (async () => {
-        await Promise.allSettled(opening);
-        await Promise.all([...handles].map((handle) => handle.close()));
-        handles.clear();
-      })();
-      void stopping.catch(() => {});
-    }
-    return stopping;
+  const stop = async () => {
+    lifetime.abort(new GatewayControlUiIngressError("closed", "Plugin Control UI ingress stopped"));
   };
   lease.retain(() => void stop());
-  const openHandle = <T extends { close(): Promise<void> }>(
-    open: (factory: GatewayControlUiIngressFactoryV2) => Promise<T>,
-  ): Promise<T> => {
-    const operation = (async () => {
-      const { createGatewayControlUiIngressFactory } =
-        await import("../gateway/remote-control-ui-ingress.js");
-      const handle = await open(
-        createGatewayControlUiIngressFactory({
-          pluginId: record.id,
-          signal,
-          assertCurrent,
-          host,
-        }),
-      );
-      try {
-        assertCurrent();
-      } catch (error) {
-        await handle.close();
-        throw error;
-      }
-      const owned = {
-        ...handle,
-        async close() {
-          await handle.close();
-          handles.delete(owned);
-        },
-      };
-      handles.add(owned);
-      return owned;
-    })();
-    opening.add(operation);
-    void operation.finally(() => opening.delete(operation)).catch(() => {});
-    return operation;
+  const hostFactory = async () => {
+    const { createGatewayControlUiIngressFactory } =
+      await import("../gateway/remote-control-ui-ingress.js");
+    return createGatewayControlUiIngressFactory({
+      pluginId: record.id,
+      signal,
+      assertCurrent,
+      host,
+    });
   };
   return {
     stop,
     factory: {
       capabilityVersion: 2,
-      open: (input) => openHandle((factory) => factory.open(input)),
-      bindPrincipal: (input) => openHandle((factory) => factory.bindPrincipal(input)),
+      open: async (input) => (await hostFactory()).open(input),
+      bindPrincipal: async (input) => (await hostFactory()).bindPrincipal(input),
     },
   };
 }

@@ -8,16 +8,16 @@ import { resolveControlUiAllowedOrigins } from "../config/gateway-control-ui-ori
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { getHeader } from "./http-header-value.js";
 import {
+  getRemoteControlUiIngressContext,
+  hasCurrentRemoteControlUiIngress,
+} from "./ingress-attribution.js";
+import {
   isLocalDirectRequest,
   isLoopbackHost,
   isPrivateOrLoopbackAddress,
   normalizeHostHeader,
   resolveHostName,
 } from "./net.js";
-import {
-  getRemoteControlUiIngressContext,
-  hasCurrentRemoteControlUiIngress,
-} from "./remote-control-ui-context.js";
 import type {
   GatewayWsBrowserOrigin,
   RemoteControlUiIngressContext,

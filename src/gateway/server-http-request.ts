@@ -52,6 +52,8 @@ import {
   runGatewayHttpRequest,
 } from "./http-request-authority.js";
 import {
+  assertRemoteControlUiIngressCurrent,
+  getRemoteControlUiIngressContext,
   markGatewayIngressTransport,
   prepareGatewayIngressAttribution,
 } from "./ingress-attribution.js";
@@ -60,10 +62,6 @@ import {
   handleProviderOAuthCallback,
   PROVIDER_OAUTH_CALLBACK_PATH,
 } from "./provider-browser-auth.js";
-import {
-  getRemoteControlUiIngressContext,
-  assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
 import {
   resolveRemoteControlUiHttpRoute,
   type RemoteControlUiHttpRoute,

@@ -41,12 +41,12 @@ import {
   tryBeginGatewayRootWorkAdmission,
 } from "../../../process/gateway-work-admission.js";
 import { isWebchatClient } from "../../../utils/message-channel.js";
-import { isLocalishHost, isLoopbackAddress } from "../../net.js";
-import { resolveNodePairingClientIpSource } from "../../node-pairing-auto-approve.js";
 import {
   assertRemoteControlUiIngressCurrent,
   getRemoteControlUiIngressContext,
-} from "../../remote-control-ui-context.js";
+} from "../../ingress-attribution.js";
+import { isLocalishHost, isLoopbackAddress } from "../../net.js";
+import { resolveNodePairingClientIpSource } from "../../node-pairing-auto-approve.js";
 import {
   MAX_PREAUTH_PAYLOAD_BYTES,
   MAX_QUEUED_GATEWAY_PREAUTH_FRAMES,
@@ -170,12 +170,11 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
   const runDetachedConnectWork = (run: () => Promise<void>, onError: (error: unknown) => void) => {
     // Connect-triggered mutations outlive hello-ok. Give each tail its own
     // root lease so suspension cannot report ready while one is still active.
-    const work = params.connectionWork
+    void params.connectionWork
       .track(() =>
         runWithGatewayIndependentRootWorkAdmission(run, "ws:preauth", params.connectionWork.signal),
       )
       .catch(onError);
-    void remoteIngress?.trackWork(work);
   };
 
   const rejectOversizedPreauthFrame = (data: GatewayConnectionFrame): boolean => {
@@ -527,7 +526,7 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
       onSettled?.();
       return;
     }
-    const work = params.connectionWork
+    void params.connectionWork
       .track(() =>
         runWithDiagnosticTraceContext(createDiagnosticTraceContext(), () =>
           runWithMainThreadTask("gateway:ws:frame", () => handleIncomingMessage(data, admission)),
@@ -537,7 +536,6 @@ export function attachGatewayWsMessageHandler(params: GatewayWsMessageHandlerPar
         logGateway.error(`request dispatch failed conn=${connId}: ${formatForLog(error)}`);
       })
       .finally(onSettled);
-    void remoteIngress?.trackWork(work);
   };
 
   let queuedHandshakeFrames: GatewayConnectionFrame[] | undefined;

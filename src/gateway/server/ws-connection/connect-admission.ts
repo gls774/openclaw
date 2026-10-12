@@ -30,14 +30,13 @@ import {
   isOperatorUiClient,
 } from "../../../utils/message-channel.js";
 import { isGatewayAuthPolicyCurrent } from "../../auth-policy.js";
-import { resolveIdentityOperatorScopes } from "../../operator-identity-scopes.js";
-import type { OperatorScope } from "../../operator-scopes.js";
-import { checkGatewayWsBrowserOrigin, normalizeChromeExtensionOrigin } from "../../origin-check.js";
 import {
   getRemoteControlUiIngressContext,
   hasCurrentRemoteControlUiIngress,
-  remoteControlUiGatewayAuthError,
-} from "../../remote-control-ui-context.js";
+} from "../../ingress-attribution.js";
+import { resolveIdentityOperatorScopes } from "../../operator-identity-scopes.js";
+import type { OperatorScope } from "../../operator-scopes.js";
+import { checkGatewayWsBrowserOrigin, normalizeChromeExtensionOrigin } from "../../origin-check.js";
 import { parseGatewayRole } from "../../role-policy.js";
 import { authenticatedProfileUnavailableError } from "../../server-methods/gateway-client-identity.js";
 import { formatForLog } from "../../ws-log.js";
@@ -180,10 +179,6 @@ export function resolveGatewayConnectPolicyFailure(
   context: GatewayConnectPhaseContext,
   state: AuthenticatedGatewayConnect,
 ): { kind: "auth" } | { kind: "origin"; reason: string } | undefined {
-  const remoteIngress = getRemoteControlUiIngressContext(context.handler.upgradeReq);
-  if (remoteIngress && !hasCurrentRemoteControlUiIngress(remoteIngress)) {
-    return { kind: "auth" };
-  }
   if (context.browserOrigin) {
     const originCheck = checkGatewayWsBrowserOrigin(context.browserOrigin, getRuntimeConfig());
     if (!originCheck.ok) {
@@ -289,27 +284,21 @@ export async function admitGatewayConnect(context: GatewayConnectPhaseContext) {
   const scopes = Array.isArray(connectParams.scopes) ? connectParams.scopes : [];
   const remoteIngress = getRemoteControlUiIngressContext(context.handler.upgradeReq);
   if (remoteIngress) {
-    const configError = remoteControlUiGatewayAuthError(
-      context.handler.getResolvedAuth(),
-      getRuntimeConfig(),
-      remoteIngress.principal,
-    );
     const denied = !hasCurrentRemoteControlUiIngress(remoteIngress)
       ? "Remote Control UI ingress is no longer active; reconnect through the current grant."
-      : (configError ??
-        (role !== "operator"
-          ? "Remote Control UI ingress only admits the operator role."
-          : !connectParams.device
-            ? "Remote Control UI ingress requires a signed device identity."
-            : Object.values(connectParams.auth ?? {}).some((credential) => credential !== undefined)
-              ? "Remote Control UI ingress requires a credential-free signed device; reconnect without stored credentials."
-              : !roleScopesAllow({
-                    role,
-                    requestedScopes: scopes,
-                    allowedScopes: remoteIngress.operatorScopeCeiling,
-                  })
-                ? "Remote Control UI scopes must stay within this grant's operator scope ceiling."
-                : undefined));
+      : role !== "operator"
+        ? "Remote Control UI ingress only admits the operator role."
+        : !connectParams.device
+          ? "Remote Control UI ingress requires a signed device identity."
+          : Object.values(connectParams.auth ?? {}).some((credential) => credential !== undefined)
+            ? "Remote Control UI ingress requires a credential-free signed device; reconnect without stored credentials."
+            : !roleScopesAllow({
+                  role,
+                  requestedScopes: scopes,
+                  allowedScopes: remoteIngress.operatorScopeCeiling,
+                })
+              ? "Remote Control UI scopes must stay within this grant's operator scope ceiling."
+              : undefined;
     if (denied) {
       markHandshakeFailure("remote-control-ui-admission-denied");
       sendHandshakeErrorResponse(ErrorCodes.FORBIDDEN, denied);

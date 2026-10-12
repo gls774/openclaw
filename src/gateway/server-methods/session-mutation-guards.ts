@@ -16,12 +16,12 @@ import {
   readGatewayDeviceRevocationGuard,
 } from "../device-revocation.js";
 import type { ExpectedProfileBinding } from "../expected-profile.js";
+import { assertRemoteControlUiIngressCurrent } from "../ingress-attribution.js";
 import { isInternalApprovalCommitGuard } from "../internal-approval-authority.js";
 import {
   authorizeCurrentOperatorRoleScopes,
   resolveGatewayOperatorRoleActor,
 } from "../operator-role-policy.js";
-import { assertRemoteControlUiIngressCurrent } from "../remote-control-ui-context.js";
 import { SharedGatewaySessionGenerationState } from "../server-shared-auth-generation.js";
 import type { GatewayWsClient } from "../server/ws-types.js";
 import { SessionMutationAuthorizationChangedError } from "../session-mutation-authorization-error.js";

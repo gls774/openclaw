@@ -139,8 +139,8 @@ after the same capability-version check. It needs no UI origins and returns a
   scopes. It cannot inherit extra admin authority from the calling plugin request.
 - `openControlUi({ publicOrigin, sandboxOrigin, frameAncestors })` opens UI
   transport sharing this binding's principal resolution and grant lifetime.
-- `close()` fences the binding, closes its UI transports, and waits for owned
-  work to settle.
+- `close()` fences the binding and aborts its UI transports without waiting for
+  in-flight work. Live authority checks reject later effects and publication.
 
 Create one binding for a grant shared by UI and RPC. Do not separately construct
 an owner client for MCP calls. `factory.open()` is the UI-first convenience form:
@@ -163,28 +163,26 @@ The returned `GatewayControlUiIngressV2` exposes:
   protocol and a `GatewayIngressSocketV1`. The main socket is at the base path,
   without a `/ws` suffix. Existing Control UI auxiliary sockets retain their
   owning ticket and scope checks.
-- `close()`: fences new admission, aborts reads and sockets, and waits for owned
-  work to settle. Retained methods refuse work after closure or service retirement.
+- `close()`: fences new admission and aborts reads and sockets without waiting
+  for in-flight work. Retained methods refuse work after closure or service retirement.
 - `requestGateway(method, params, { signal }?)`: grant-bound Gateway RPC as above.
 
 A socket accepts text or binary `GatewayIngressMessage` values through
 `send()`, exposes received values through the `messages` async iterable, and
-reports its final close code and reason through `closed`. `send()` waits for
-bounded admission and drain. The host limits request bodies, frame sizes,
-concurrent HTTP streams, and sockets; per-plugin quotas do not depend on a
-claimed client IP.
+reports its final close code and reason through `closed`. `send()` resolves when
+the native WebSocket accepts the write. Node streams provide backpressure; the
+host limits request bodies, frame sizes, concurrent HTTP streams, and sockets.
 
 Each handle admits 16 HTTP streams, two main sockets, and two auxiliary sockets.
-The plugin-wide limits are 32 principal bindings, 32 handles, 64 HTTP streams, eight sockets, and 64 MiB
-of buffered transport data. HTTP request and response bodies are capped at
-100 MiB; WebSocket messages retain the Gateway's 25 MiB maximum and its lower
+HTTP request and response bodies are capped at 100 MiB; WebSocket messages retain
+the Gateway's 25 MiB maximum and its lower
 preauthentication limit. Endpoint-native limits still apply. Compressed request
 bodies are refused; send decoded bytes.
 
-Consume or cancel HTTP response bodies, and drain or close sockets. A remotely
-closed socket keeps its final messages and quota slot until they are consumed or
-discarded. Failed admission aborts transport immediately and settles owned work
-before rejecting. A slow consumer or exceeded limit produces an explicit error.
+Consume or cancel HTTP response bodies, and read or close sockets. Socket slots
+are released when the connection closes. Failed admission aborts transport
+immediately; it does not wait for handlers to settle. Exceeded limits produce an
+explicit error.
 
 `pluginReadCookies` describes only core-issued signed, read-only native-asset
 or iframe grants. It does not authorize forwarding arbitrary `Set-Cookie`

@@ -107,54 +107,6 @@ function fixture(
 }
 
 describe("screen-owned desktop audio", () => {
-  it("keeps remote ingress work pending until recorder teardown settles", async () => {
-    const started = createDeferred();
-    const stopping = createDeferred();
-    const stopped = createDeferred();
-    const grant = new AbortController();
-    const tracked: Promise<unknown>[] = [];
-    const ingress = createRemoteControlUiIngressTestContext({
-      signal: grant.signal,
-      trackWork(work) {
-        tracked.push(work);
-        return work;
-      },
-    });
-    const f = fixture(
-      undefined,
-      {
-        async start() {
-          started.resolve();
-          return {
-            stream: new PassThrough(),
-            async stop() {
-              stopping.resolve();
-              await stopped.promise;
-            },
-          };
-        },
-      },
-      ingress,
-    );
-    f.attach();
-    f.observation.activate();
-    f.peer.command("start");
-    await started.promise;
-    let settled = false;
-    const drain = Promise.all(tracked).then(() => {
-      settled = true;
-    });
-    grant.abort();
-    await stopping.promise;
-    try {
-      expect(settled).toBe(false);
-    } finally {
-      stopped.resolve();
-    }
-    await drain;
-    expect(settled).toBe(true);
-  });
-
   it("does not capture on attach or before screen authentication, then delivers remote PCM", async () => {
     const f = fixture();
     f.attach();

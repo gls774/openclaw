@@ -1,5 +1,6 @@
-import { validateHeaderValue } from "node:http";
+import { isDeepStrictEqual } from "node:util";
 import { containsAsciiControlCharacter } from "@openclaw/normalization-core/string-normalization";
+import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/index.js";
 import {
   GatewayControlUiIngressError,
   type GatewayControlUiIngressFactoryV2,
@@ -11,20 +12,17 @@ import {
 } from "../plugins/gateway-ingress.types.js";
 import { validateRemoteControlUiFrameAncestors } from "./control-ui-csp.js";
 import { filterRemoteControlUiPluginReadCookies } from "./control-ui-plugin-auth-cookie.js";
+import { captureGatewayOperatorRunAuthority } from "./operator-run-authority.js";
 import { isOperatorScope } from "./operator-scopes.js";
 import { resolveRemoteControlUiHttpRoute } from "./remote-control-ui-http-routing.js";
 import type { GatewayControlUiIngressHost } from "./remote-control-ui-ingress-host.js";
 import { createRemoteControlUiTransport } from "./remote-control-ui-transport.js";
 import { prepareRemoteIngressPrincipal } from "./remote-ingress-principal.js";
-import { requestRemoteIngressGateway } from "./remote-ingress-request.js";
+import { dispatchGatewayRequestInProcess } from "./server-in-process-dispatch.js";
+import type { GatewayClient } from "./server-methods/client-types.js";
 import type { RemoteControlUiIngressContext } from "./server/client-identity-types.js";
 
-const MAX_HANDLES_PER_PLUGIN = 32;
 const MAX_HTTP_PER_HANDLE = 16;
-const MAX_HTTP_PER_PLUGIN = 64;
-const MAX_SOCKETS_PER_PLUGIN = 8;
-// A maximum-sized message can occupy both a wire buffer and a decoded queue.
-const MAX_BUFFERED_BYTES_PER_PLUGIN = 64 * 1024 * 1024;
 const requestHeaders = new Set([
   "accept",
   "accept-language",
@@ -65,15 +63,6 @@ const responseHeaders = new Set([
   "location",
 ]);
 
-type PluginQuota = {
-  bindings: number;
-  handles: number;
-  http: number;
-  sockets: number;
-  bytes: number;
-};
-const quotas = new WeakMap<GatewayControlUiIngressHost, Map<string, PluginQuota>>();
-
 function invalid(message: string): never {
   throw new GatewayControlUiIngressError("invalid-options", message);
 }
@@ -113,29 +102,9 @@ function validatePath(value: string): void {
 }
 
 function prepareRequestHeaders(input: GatewayControlUiIngressRequestV1["headers"], origin: string) {
-  if (!Array.isArray(input) || input.length > 64) {
-    invalid("Remote Control UI requests support at most 64 headers.");
-  }
-  let bytes = 0;
   const headers: [string, string][] = [];
   for (const [rawName, value] of input) {
-    if (
-      typeof rawName !== "string" ||
-      typeof value !== "string" ||
-      !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(rawName)
-    ) {
-      invalid("Remote Control UI request headers are malformed.");
-    }
-    bytes += Buffer.byteLength(rawName) + Buffer.byteLength(value);
-    if (bytes > 16 * 1024) {
-      invalid("Remote Control UI request headers exceed 16 KiB.");
-    }
     const name = rawName.toLowerCase();
-    try {
-      validateHeaderValue(name, value);
-    } catch {
-      invalid("Remote Control UI request header values must be valid HTTP bytes.");
-    }
     if (name === "content-encoding" && value.toLowerCase() !== "identity") {
       invalid("Compressed remote Control UI request bodies are unsupported; send decoded bytes.");
     }
@@ -173,14 +142,6 @@ function validatePresentation(options: GatewayControlUiIngressPresentationOption
 
 function validatePrincipalOptions(options: GatewayIngressPrincipalOptionsV1) {
   if (
-    typeof options.audienceId !== "string" ||
-    !options.audienceId ||
-    options.audienceId.length > 256 ||
-    containsAsciiControlCharacter(options.audienceId)
-  ) {
-    invalid("audienceId must be a nonempty opaque identity of at most 256 characters.");
-  }
-  if (
     !options.principal ||
     (options.principal.kind !== "owner" && options.principal.kind !== "person") ||
     (options.principal.kind === "person" &&
@@ -188,10 +149,7 @@ function validatePrincipalOptions(options: GatewayIngressPrincipalOptionsV1) {
   ) {
     invalid("principal must explicitly select owner or an existing verified person profile.");
   }
-  if (
-    !Array.isArray(options.operatorScopeCeiling) ||
-    options.operatorScopeCeiling.some((scope) => !isOperatorScope(scope))
-  ) {
+  if (options.operatorScopeCeiling.some((scope) => !isOperatorScope(scope))) {
     invalid("operatorScopeCeiling must contain only supported operator scopes.");
   }
   return Object.freeze([...new Set(options.operatorScopeCeiling)]);
@@ -205,460 +163,328 @@ export function createGatewayControlUiIngressFactory(params: {
   host: GatewayControlUiIngressHost;
 }): GatewayControlUiIngressFactoryV2 {
   const { host, pluginId } = params;
-  let pluginQuotas = quotas.get(host);
-  if (!pluginQuotas) {
-    pluginQuotas = new Map();
-    quotas.set(host, pluginQuotas);
-  }
-  let quota = pluginQuotas.get(pluginId);
-  if (!quota) {
-    quota = { bindings: 0, handles: 0, http: 0, sockets: 0, bytes: 0 };
-    pluginQuotas.set(pluginId, quota);
-  }
-  const pluginQuota = quota;
   async function bindPrincipal(
     options: GatewayIngressPrincipalOptionsV1,
   ): Promise<GatewayIngressPrincipalBindingV1> {
     const operatorScopeCeiling = validatePrincipalOptions(options);
     const principal = Object.freeze({ ...options.principal });
-    const lifetime = new AbortController();
-    const grantSignal = AbortSignal.any([
-      params.signal,
-      host.signal,
-      options.signal,
-      lifetime.signal,
-    ]);
+    const grantSignal = AbortSignal.any([params.signal, host.signal, options.signal]);
     const grantAssertion = options.assertCurrent;
     const assertGrant = () => {
       grantSignal.throwIfAborted();
-      try {
-        params.assertCurrent();
-        grantAssertion();
-      } catch (error) {
-        lifetime.abort(error);
-        throw error;
-      }
+      params.assertCurrent();
+      grantAssertion();
     };
     assertGrant();
-    if (pluginQuota.bindings >= MAX_HANDLES_PER_PLUGIN) {
-      throw new GatewayControlUiIngressError(
-        "limit-exceeded",
-        "Remote ingress plugin binding quota exceeded.",
-      );
-    }
-    pluginQuota.bindings += 1;
-    let preparedAuthority: Awaited<ReturnType<typeof prepareRemoteIngressPrincipal>> | undefined;
-    try {
-      preparedAuthority = await prepareRemoteIngressPrincipal({
-        principal,
-        operatorScopeCeiling,
-        getRuntimeConfig: () => host.getRuntimeConfig(),
-        getResolvedAuth: () => host.getResolvedAuth(),
-        signal: grantSignal,
-        assertCurrent: assertGrant,
-      });
-      assertGrant();
-    } catch (error) {
-      preparedAuthority?.close();
-      pluginQuota.bindings -= 1;
-      lifetime.abort(error);
-      throw error;
-    }
-    const authority = preparedAuthority;
-    const signal = authority.signal;
+    const authority = await prepareRemoteIngressPrincipal({
+      principal,
+      operatorScopeCeiling,
+      getRuntimeConfig: () => host.getRuntimeConfig(),
+      getResolvedAuth: () => host.getResolvedAuth(),
+      signal: grantSignal,
+      assertCurrent: assertGrant,
+    });
+    const principalSignal = authority.signal;
     const resolvePrincipal = () => authority.resolve();
-    const assertCurrent = authority.assertCurrent;
-    const handles = new Set<GatewayControlUiIngressV2>();
-    const work = new Set<Promise<unknown>>();
-    const trackWork = <T>(promise: Promise<T>): Promise<T> => {
-      work.add(promise);
-      void promise.then(
-        () => work.delete(promise),
-        () => work.delete(promise),
-      );
-      return promise;
+    const assertPrincipalCurrent = authority.assertCurrent;
+    const closeBinding = async () => {
+      authority.close();
     };
-    let closing: Promise<void> | undefined;
-    const close = () => {
-      if (!closing) {
-        closing = Promise.resolve().then(async () => {
-          await Promise.all([...handles].map((handle) => handle.close()));
-          while (work.size) {
-            await Promise.allSettled(work);
-          }
-          authority.close();
-          pluginQuota.bindings -= 1;
-          signal.removeEventListener("abort", onAbort);
-        });
-        lifetime.abort(
-          new GatewayControlUiIngressError("closed", "Remote ingress binding is closed."),
-        );
-      }
-      return closing;
-    };
-    const onAbort = () => {
-      void close();
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    const requestGateway = async <T>(
+    const requestPrincipal = async <T>(
       method: string,
       requestParams: Record<string, unknown>,
       requestOptions?: { signal?: AbortSignal },
       ingressContext?: RemoteControlUiIngressContext,
     ): Promise<T> => {
-      return trackWork(
-        requestRemoteIngressGateway<T>({
-          host,
-          pluginId,
-          resolvePrincipal,
-          signal,
-          trackWork,
-          method,
-          params: requestParams,
-          requestSignal: requestOptions?.signal,
-          ingressContext,
-        }),
-      );
-    };
-    const binding: GatewayIngressPrincipalBindingV1 = {
-      request: requestGateway,
-      async openControlUi(presentationOptions) {
-        assertCurrent();
-        const handle = await openControlUi(presentationOptions, {
-          principal,
-          operatorScopeCeiling,
-          resolvePrincipal,
-          audienceId: options.audienceId,
-          signal,
-          assertCurrent,
-          requestGateway,
-        });
-        const owned: GatewayControlUiIngressV2 = Object.freeze({
-          ...handle,
-          async close() {
-            await handle.close();
-            handles.delete(owned);
-          },
-        });
-        handles.add(owned);
-        try {
-          assertCurrent();
-        } catch (error) {
-          await owned.close();
-          throw error;
-        }
-        return owned;
-      },
-      close,
-    };
-    if (signal.aborted) {
-      await close();
-      assertCurrent();
-    }
-    return Object.freeze(binding);
-  }
-  async function openControlUi(
-    options: GatewayControlUiIngressPresentationOptionsV1,
-    bound: Pick<
-      RemoteControlUiIngressContext,
-      | "principal"
-      | "operatorScopeCeiling"
-      | "resolvePrincipal"
-      | "audienceId"
-      | "signal"
-      | "assertCurrent"
-    > & {
-      requestGateway<T>(
-        method: string,
-        params: Record<string, unknown>,
-        options?: { signal?: AbortSignal },
-        ingressContext?: RemoteControlUiIngressContext,
-      ): Promise<T>;
-    },
-  ): Promise<GatewayControlUiIngressV2> {
-    const presentation = {
-      ...validatePresentation(options),
-      operatorScopeCeiling: bound.operatorScopeCeiling,
-    };
-    const gateway = host.getRuntimeConfig().gateway;
-    const originPolicy = {
-      publicOrigin: gateway?.publicOrigin,
-      allowedOrigins: gateway?.controlUi?.allowedOrigins?.slice(),
-      hostFallback: gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback,
-    };
-    const lifetime = new AbortController();
-    const signal = AbortSignal.any([bound.signal, lifetime.signal]);
-    const assertCurrent = () => {
-      if (signal.aborted) {
-        throw new GatewayControlUiIngressError("closed", "Remote Control UI ingress is closed.");
+      const principalSnapshot = resolvePrincipal();
+      const context = host.resolveGatewayContext?.();
+      if (!context) {
+        throw new GatewayControlUiIngressError(
+          "unavailable",
+          "Gateway request dispatch is unavailable.",
+        );
       }
+      const requestSignal = requestOptions?.signal
+        ? AbortSignal.any([principalSignal, requestOptions.signal])
+        : principalSignal;
+      const assertRequestCurrent = () => {
+        requestSignal.throwIfAborted();
+        principalSnapshot.assertCurrent();
+        if (host.resolveGatewayContext?.() !== context) {
+          throw new GatewayControlUiIngressError("closed", "Gateway request owner was replaced.");
+        }
+      };
+      const hasCurrentClientAuthority = () => {
+        try {
+          assertRequestCurrent();
+          return true;
+        } catch {
+          return false;
+        }
+      };
+      assertRequestCurrent();
+      const internal: NonNullable<GatewayClient["internal"]> = {
+        authenticatedOperator: true,
+        remoteIngressPrincipal: principalSnapshot,
+        operatorDeviceTokenIdentity: null,
+        operatorRoleActor: principalSnapshot.operatorRoleActor,
+        operatorAccessAuthority: principalSnapshot.operatorAccessAuthority,
+        pluginRuntimeOwnerId: pluginId,
+      };
+      const client: GatewayClient = {
+        connectionSignal: requestSignal,
+        remoteControlUiIngress: ingressContext,
+        connect: {
+          minProtocol: PROTOCOL_VERSION,
+          maxProtocol: PROTOCOL_VERSION,
+          client: { id: "gateway-client", version: "1", platform: "plugin", mode: "backend" },
+          role: "operator",
+          scopes: [...principalSnapshot.scopes],
+        },
+        authenticatedUserProfile: principalSnapshot.authenticatedUserProfile,
+        preparedSessionProfile: principalSnapshot.preparedSessionProfile,
+        internal,
+      };
+      const captured = await captureGatewayOperatorRunAuthority({
+        client,
+        context,
+        hasCurrentClientAuthority,
+        invocationAuthority: { assertCurrent: assertRequestCurrent, signal: requestSignal },
+      });
       try {
-        bound.assertCurrent();
-      } catch (error) {
-        lifetime.abort(error);
-        throw error;
-      }
-      const config = host.getRuntimeConfig();
-      const current = config.gateway;
-      const origins = current?.controlUi?.allowedOrigins;
-      if (
-        current?.controlUi?.enabled === false ||
-        current?.publicOrigin !== originPolicy.publicOrigin ||
-        current?.controlUi?.dangerouslyAllowHostHeaderOriginFallback !==
-          originPolicy.hostFallback ||
-        (origins === undefined) !== (originPolicy.allowedOrigins === undefined) ||
-        origins?.length !== originPolicy.allowedOrigins?.length ||
-        origins?.some((origin, index) => origin !== originPolicy.allowedOrigins?.[index])
-      ) {
-        const error = new GatewayControlUiIngressError(
-          "closed",
-          "Control UI origin policy changed; open a new ingress handle under the current policy.",
-        );
-        lifetime.abort(error);
-        throw error;
-      }
-    };
-    assertCurrent();
-    if (pluginQuota.handles >= MAX_HANDLES_PER_PLUGIN) {
-      throw new GatewayControlUiIngressError(
-        "limit-exceeded",
-        "Remote Control UI plugin handle quota exceeded.",
-      );
-    }
-    pluginQuota.handles += 1;
-    const work = new Set<Promise<unknown>>();
-    const context: RemoteControlUiIngressContext = Object.freeze({
-      ...presentation,
-      pluginId,
-      audienceId: bound.audienceId,
-      principal: bound.principal,
-      resolvePrincipal: bound.resolvePrincipal,
-      signal,
-      assertCurrent,
-      trackWork<T>(promise: Promise<T>): Promise<T> {
-        work.add(promise);
-        void promise.then(
-          () => work.delete(promise),
-          () => work.delete(promise),
-        );
-        return promise;
-      },
-    });
-    const transport = createRemoteControlUiTransport({
-      context,
-      host,
-      reserveBytes(bytes) {
-        assertCurrent();
-        if (bytes > MAX_BUFFERED_BYTES_PER_PLUGIN - pluginQuota.bytes) {
-          throw new GatewayControlUiIngressError(
-            "limit-exceeded",
-            "Remote Control UI plugin buffer quota exceeded.",
-          );
+        assertRequestCurrent();
+        if (captured) {
+          internal.operatorRunAuthority = captured.authority;
         }
-        pluginQuota.bytes += bytes;
-        let held = true;
-        return () => {
-          if (held) {
-            held = false;
-            pluginQuota.bytes -= bytes;
-          }
-        };
-      },
-    });
-    let http = 0;
-    const sockets = { main: 0, auxiliary: 0 };
-    let closing: Promise<void> | undefined;
-    const close = () => {
-      if (!closing) {
-        // Publish closure before starting cleanup, including recursive abort callbacks.
-        closing = Promise.resolve().then(async () => {
-          await transport.close();
-          while (work.size) {
-            await Promise.allSettled(work);
-          }
-          pluginQuota.handles -= 1;
-          signal.removeEventListener("abort", onAbort);
+        const result = await dispatchGatewayRequestInProcess<T>(method, requestParams, {
+          client,
+          context,
+          signal: requestSignal,
+          hasCurrentClientAuthority,
+          methodRegistry: context.getGatewayMethodRegistry?.(),
+          requestIdPrefix: "remote-ingress",
+          assertPreparationCurrent: assertRequestCurrent,
+          sessionMutationCommitGuard: assertRequestCurrent,
+          assertCreatedInputSourceCurrent: assertRequestCurrent,
         });
-        lifetime.abort();
+        assertRequestCurrent();
+        return result;
+      } finally {
+        captured?.release();
       }
-      return closing;
     };
-    const onAbort = () => {
-      void close();
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    const handle: GatewayControlUiIngressV2 = {
-      async requestGateway(method, requestParams, requestOptions) {
-        assertCurrent();
-        const requestSignal = requestOptions?.signal
-          ? AbortSignal.any([signal, requestOptions.signal])
-          : signal;
-        return context.trackWork(
-          bound.requestGateway(method, requestParams, { signal: requestSignal }, context),
-        );
-      },
-      presentation: Object.freeze({
-        basePath: host.controlUiBasePath,
-        publicOrigin: presentation.publicOrigin,
-        sandboxOrigin: presentation.sandboxOrigin,
-        operatorScopeCeiling: presentation.operatorScopeCeiling,
-      }),
-      async request(input) {
-        assertCurrent();
-        validatePath(input.pathAndQuery);
-        if (input.surface !== "control-ui" && input.surface !== "sandbox") {
-          invalid("Unknown remote Control UI surface.");
+    async function openControlUi(
+      presentationOptions: GatewayControlUiIngressPresentationOptionsV1,
+    ): Promise<GatewayControlUiIngressV2> {
+      const presentation = {
+        ...validatePresentation(presentationOptions),
+        operatorScopeCeiling,
+      };
+      const readOriginPolicy = () => {
+        const gateway = host.getRuntimeConfig().gateway;
+        return {
+          enabled: gateway?.controlUi?.enabled !== false,
+          publicOrigin: gateway?.publicOrigin,
+          allowedOrigins: gateway?.controlUi?.allowedOrigins?.slice(),
+          hostFallback: gateway?.controlUi?.dangerouslyAllowHostHeaderOriginFallback,
+        };
+      };
+      const originPolicy = readOriginPolicy();
+      const handleLifetime = new AbortController();
+      const handleSignal = AbortSignal.any([principalSignal, handleLifetime.signal]);
+      const assertHandleCurrent = () => {
+        if (handleSignal.aborted) {
+          throw new GatewayControlUiIngressError("closed", "Remote Control UI ingress is closed.");
         }
-        if (
-          !["GET", "HEAD", "POST"].includes(input.method) ||
-          (input.body && input.method !== "POST")
-        ) {
-          invalid("Remote Control UI supports GET/HEAD and owner-authorized POST bodies only.");
+        try {
+          assertPrincipalCurrent();
+        } catch (error) {
+          handleLifetime.abort(error);
+          throw error;
         }
-        const origin =
-          input.surface === "sandbox" ? presentation.sandboxOrigin : presentation.publicOrigin;
-        const headers = prepareRequestHeaders(input.headers, origin);
-        if (http >= MAX_HTTP_PER_HANDLE || pluginQuota.http >= MAX_HTTP_PER_PLUGIN) {
-          throw new GatewayControlUiIngressError(
-            "limit-exceeded",
-            "Remote Control UI HTTP concurrency quota exceeded.",
+        const current = readOriginPolicy();
+        if (!current.enabled || !isDeepStrictEqual(current, originPolicy)) {
+          const error = new GatewayControlUiIngressError(
+            "closed",
+            "Control UI origin policy changed; open a new ingress handle under the current policy.",
           );
+          handleLifetime.abort(error);
+          throw error;
         }
-        http += 1;
-        pluginQuota.http += 1;
-        let held = true;
-        const release = () => {
-          if (held) {
-            held = false;
+      };
+      assertHandleCurrent();
+      const context: RemoteControlUiIngressContext = Object.freeze({
+        ...presentation,
+        pluginId,
+        audienceId: options.audienceId,
+        principal,
+        resolvePrincipal,
+        signal: handleSignal,
+        assertCurrent: assertHandleCurrent,
+      });
+      const transport = createRemoteControlUiTransport({ context, host });
+      let http = 0;
+      const sockets = { main: 0, auxiliary: 0 };
+      const closeHandle = () => {
+        handleLifetime.abort();
+        return transport.close();
+      };
+      const handle: GatewayControlUiIngressV2 = {
+        async requestGateway(method, requestParams, requestOptions) {
+          assertHandleCurrent();
+          const requestSignal = requestOptions?.signal
+            ? AbortSignal.any([handleSignal, requestOptions.signal])
+            : handleSignal;
+          return requestPrincipal(method, requestParams, { signal: requestSignal }, context);
+        },
+        presentation: Object.freeze({
+          basePath: host.controlUiBasePath,
+          publicOrigin: presentation.publicOrigin,
+          sandboxOrigin: presentation.sandboxOrigin,
+          operatorScopeCeiling: presentation.operatorScopeCeiling,
+        }),
+        async request(input) {
+          assertHandleCurrent();
+          validatePath(input.pathAndQuery);
+          if (input.surface !== "control-ui" && input.surface !== "sandbox") {
+            invalid("Unknown remote Control UI surface.");
+          }
+          if (
+            !["GET", "HEAD", "POST"].includes(input.method) ||
+            (input.body && input.method !== "POST")
+          ) {
+            invalid("Remote Control UI supports GET/HEAD and owner-authorized POST bodies only.");
+          }
+          const origin =
+            input.surface === "sandbox" ? presentation.sandboxOrigin : presentation.publicOrigin;
+          const headers = prepareRequestHeaders(input.headers, origin);
+          if (http >= MAX_HTTP_PER_HANDLE) {
+            throw new GatewayControlUiIngressError(
+              "limit-exceeded",
+              "Remote Control UI HTTP concurrency quota exceeded.",
+            );
+          }
+          http += 1;
+          const release = () => {
             http -= 1;
-            pluginQuota.http -= 1;
-          }
-        };
-        let result: Awaited<ReturnType<typeof transport.request>> | undefined;
-        try {
-          result = await transport.request({ ...input, headers });
-          void result.completion.then(release, release);
-          assertCurrent();
-          const safeHeaders = new Headers();
-          for (const [name, value] of result.response.headers) {
-            if (responseHeaders.has(name)) {
-              safeHeaders.append(name, value);
-            }
-          }
-          const location = safeHeaders.get("location");
-          if (location) {
-            const target = URL.parse(location, `${origin}${input.pathAndQuery}`);
-            if (
-              !target ||
-              target.origin !== origin ||
-              target.username ||
-              target.password ||
-              target.hash
-            ) {
-              throw new GatewayControlUiIngressError(
-                "forbidden",
-                "Remote Control UI refused a redirect outside this origin.",
-              );
-            }
-            validatePath(`${target.pathname}${target.search}`);
-            if (
-              input.surface === "sandbox" ||
-              !resolveRemoteControlUiHttpRoute(
-                {
-                  method: "GET",
-                  url: `${target.pathname}${target.search}`,
-                  headers: { accept: "text/html" },
-                },
-                host.controlUiBasePath,
-                presentation.operatorScopeCeiling,
-              )
-            ) {
-              throw new GatewayControlUiIngressError(
-                "forbidden",
-                "Remote Control UI refused a redirect outside its route surface.",
-              );
-            }
-          }
-          return {
-            response: new Response(result.response.body, {
-              status: result.response.status,
-              headers: safeHeaders,
-            }),
-            pluginReadCookies: result.pluginReadCookies,
           };
-        } catch (error) {
-          if (result) {
-            await result.response.body?.cancel(error).catch(() => undefined);
-            await result.completion;
-          } else {
-            release();
+          let result: Awaited<ReturnType<typeof transport.request>> | undefined;
+          try {
+            result = await transport.request({ ...input, headers });
+            void result.closed.then(release, release);
+            assertHandleCurrent();
+            const safeHeaders = new Headers();
+            for (const [name, value] of result.response.headers) {
+              if (responseHeaders.has(name)) {
+                safeHeaders.append(name, value);
+              }
+            }
+            const location = safeHeaders.get("location");
+            if (location) {
+              const target = URL.parse(location, `${origin}${input.pathAndQuery}`);
+              if (
+                !target ||
+                target.origin !== origin ||
+                target.username ||
+                target.password ||
+                target.hash
+              ) {
+                throw new GatewayControlUiIngressError(
+                  "forbidden",
+                  "Remote Control UI refused a redirect outside this origin.",
+                );
+              }
+              validatePath(`${target.pathname}${target.search}`);
+              if (
+                input.surface === "sandbox" ||
+                !resolveRemoteControlUiHttpRoute(
+                  {
+                    method: "GET",
+                    url: `${target.pathname}${target.search}`,
+                    headers: { accept: "text/html" },
+                  },
+                  host.controlUiBasePath,
+                  presentation.operatorScopeCeiling,
+                )
+              ) {
+                throw new GatewayControlUiIngressError(
+                  "forbidden",
+                  "Remote Control UI refused a redirect outside its route surface.",
+                );
+              }
+            }
+            return {
+              response: new Response(result.response.body, {
+                status: result.response.status,
+                headers: safeHeaders,
+              }),
+              pluginReadCookies: result.pluginReadCookies,
+            };
+          } catch (error) {
+            if (result) {
+              void result.response.body?.cancel(error).catch(() => undefined);
+            } else {
+              release();
+            }
+            throw error;
           }
-          throw error;
-        }
-      },
-      async openWebSocket(input) {
-        assertCurrent();
-        validatePath(input.pathAndQuery);
-        if (input.origin !== presentation.publicOrigin) {
-          throw new GatewayControlUiIngressError(
-            "forbidden",
-            "Browser Origin must exactly match this remote Control UI origin.",
-          );
-        }
-        if (
-          input.protocols.length > 8 ||
-          new Set(input.protocols).size !== input.protocols.length ||
-          input.protocols.some(
-            (value) => value.length > 128 || !/^[!#$%&'*+.^_`|~0-9a-z-]+$/i.test(value),
-          )
-        ) {
-          invalid("WebSocket subprotocols must be bounded HTTP tokens.");
-        }
-        const pathname = new URL(input.pathAndQuery, presentation.publicOrigin).pathname;
-        const kind = pathname === (host.controlUiBasePath || "/") ? "main" : "auxiliary";
-        if (
-          kind === "auxiliary" &&
-          !["/desktop/observe", "/desktop/audio", "/browser/screencast"].includes(pathname)
-        ) {
-          throw new GatewayControlUiIngressError(
-            "forbidden",
-            "WebSocket route is outside the Control UI ingress surface.",
-          );
-        }
-        if (sockets[kind] >= 2 || pluginQuota.sockets >= MAX_SOCKETS_PER_PLUGIN) {
-          throw new GatewayControlUiIngressError(
-            "limit-exceeded",
-            "Remote Control UI socket concurrency quota exceeded.",
-          );
-        }
-        sockets[kind] += 1;
-        pluginQuota.sockets += 1;
-        let held = true;
-        const release = () => {
-          if (held) {
-            held = false;
+        },
+        async openWebSocket(input) {
+          assertHandleCurrent();
+          validatePath(input.pathAndQuery);
+          if (input.origin !== presentation.publicOrigin) {
+            throw new GatewayControlUiIngressError(
+              "forbidden",
+              "Browser Origin must exactly match this remote Control UI origin.",
+            );
+          }
+          const pathname = new URL(input.pathAndQuery, presentation.publicOrigin).pathname;
+          const kind = pathname === (host.controlUiBasePath || "/") ? "main" : "auxiliary";
+          if (
+            kind === "auxiliary" &&
+            !["/desktop/observe", "/desktop/audio", "/browser/screencast"].includes(pathname)
+          ) {
+            throw new GatewayControlUiIngressError(
+              "forbidden",
+              "WebSocket route is outside the Control UI ingress surface.",
+            );
+          }
+          if (sockets[kind] >= 2) {
+            throw new GatewayControlUiIngressError(
+              "limit-exceeded",
+              "Remote Control UI socket concurrency quota exceeded.",
+            );
+          }
+          sockets[kind] += 1;
+          const release = () => {
             sockets[kind] -= 1;
-            pluginQuota.sockets -= 1;
+          };
+          let result: Awaited<ReturnType<typeof transport.openWebSocket>> | undefined;
+          try {
+            result = await transport.openWebSocket(input);
+            void result.socket.closed.then(release, release);
+            assertHandleCurrent();
+            return { protocol: result.protocol, socket: result.socket };
+          } catch (error) {
+            if (result) {
+              void closeHandle();
+            } else {
+              release();
+            }
+            throw error;
           }
-        };
-        let result: Awaited<ReturnType<typeof transport.openWebSocket>> | undefined;
-        try {
-          result = await transport.openWebSocket(input);
-          void result.completion.then(release, release);
-          assertCurrent();
-          return { protocol: result.protocol, socket: result.socket };
-        } catch (error) {
-          if (result) {
-            await close();
-          } else {
-            release();
-          }
-          throw error;
-        }
-      },
-      close,
+        },
+        close: closeHandle,
+      };
+      return Object.freeze(handle);
+    }
+    const binding: GatewayIngressPrincipalBindingV1 = {
+      request: requestPrincipal,
+      openControlUi,
+      close: closeBinding,
     };
-    return Object.freeze(handle);
+    assertPrincipalCurrent();
+    return Object.freeze(binding);
   }
   return {
     capabilityVersion: 2,
@@ -669,7 +495,7 @@ export function createGatewayControlUiIngressFactory(params: {
         const handle = await binding.openControlUi(options);
         return Object.freeze({ ...handle, close: () => binding.close() });
       } catch (error) {
-        await binding.close();
+        void binding.close();
         throw error;
       }
     },

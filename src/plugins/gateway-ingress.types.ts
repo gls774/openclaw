@@ -133,6 +133,6 @@ export interface GatewayControlUiIngressV1 {
     protocol?: string;
     socket: GatewayIngressSocketV1;
   }>;
-  /** Fence admission, abort reads, and wait for owned work to settle. */
+  /** Fence admission and abort transport; effect and publication guards reject stale work. */
   close(): Promise<void>;
 }

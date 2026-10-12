@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GATEWAY_OWNER_PROFILE_ID } from "../../packages/gateway-protocol/src/schema/users.js";
+import { isRedactedSecretValue } from "../config/redact-sentinel.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { resolveHostAccountName } from "../infra/host-account-name.js";
 import {
@@ -8,7 +9,6 @@ import {
   type GatewayIngressPrincipal,
 } from "../plugins/gateway-ingress.types.js";
 import { intersectOperatorScopes } from "../shared/operator-scope-compat.js";
-import { onUserProfilesChanged } from "../state/user-profile-events.js";
 import {
   captureResidentUserProfileAccess,
   prepareUserProfileIdentity,
@@ -17,12 +17,39 @@ import {
 import { ensureCanonicalGatewayOwnerProfile } from "../state/user-profile-writes.js";
 import type { ResolvedGatewayAuth } from "./auth-resolve.js";
 import { resolveGatewayOperatorAccessAuthority } from "./operator-access-policy.js";
-import {
-  onOperatorRolePolicyChanged,
-  resolveOperatorRolePolicyForAssignment,
-} from "./operator-role-policy.js";
-import { remoteControlUiGatewayAuthError } from "./remote-control-ui-context.js";
+import { resolveOperatorRolePolicyForAssignment } from "./operator-role-policy.js";
 import type { RemoteIngressPrincipalSnapshot } from "./server/client-identity-types.js";
+
+function remoteControlUiGatewayAuthError(
+  auth: ResolvedGatewayAuth,
+  cfg: OpenClawConfig,
+  principal: GatewayIngressPrincipal,
+): string | undefined {
+  if (principal.kind === "person") {
+    const proxy = auth.trustedProxy;
+    if (
+      auth.mode !== "trusted-proxy" ||
+      !cfg.gateway?.roles ||
+      proxy?.userHeader.trim().toLowerCase() !== "cf-access-authenticated-user-email" ||
+      !proxy.requiredHeaders?.some(
+        (header) => header.trim().toLowerCase() === "cf-access-jwt-assertion",
+      )
+    ) {
+      return "Person ingress requires trusted-proxy authentication with verified Cloudflare Access profiles and gateway.roles. Approve the grant from the person's authenticated Gateway Control UI.";
+    }
+    return undefined;
+  }
+  if (cfg.gateway?.roles) {
+    return "Owner ingress does not support gateway.roles. Use a person-bound grant approved in the Gateway Control UI.";
+  }
+  if (auth.mode !== "token" && auth.mode !== "password") {
+    return "Owner ingress requires gateway.auth.mode token or password without gateway.roles. Trusted-proxy Gateways require a person-bound grant.";
+  }
+  if (isRedactedSecretValue(auth[auth.mode])) {
+    return "Remote Control UI ingress cannot use a redacted Gateway credential. Replace the configured token or password with its real value locally before opening ingress.";
+  }
+  return undefined;
+}
 
 /** One grant resolves its person once, then reads the existing profile owner's live facts. */
 export async function prepareRemoteIngressPrincipal(params: {
@@ -74,15 +101,6 @@ export async function prepareRemoteIngressPrincipal(params: {
       "Remote ingress requires an available existing verified profile.",
     );
   });
-  let releaseProfiles = () => {};
-  let releaseRoles = () => {};
-  let signal = AbortSignal.any([params.signal, invalidated.signal]);
-  const release = () => {
-    releaseProfiles();
-    releaseRoles();
-    signal.removeEventListener("abort", release);
-    prepared.release();
-  };
   const invalidate = (error: unknown): never => {
     const denial =
       error instanceof GatewayControlUiIngressError
@@ -92,7 +110,7 @@ export async function prepareRemoteIngressPrincipal(params: {
             "Remote ingress principal authority changed; reopen the binding under current authority.",
           );
     invalidated.abort(denial);
-    release();
+    prepared.release();
     throw denial;
   };
   try {
@@ -115,7 +133,7 @@ export async function prepareRemoteIngressPrincipal(params: {
             requireLivePolicySet: true,
           })
         : undefined;
-    signal = AbortSignal.any([
+    const signal = AbortSignal.any([
       params.signal,
       invalidated.signal,
       ...(access ? [access.signal] : []),
@@ -144,16 +162,7 @@ export async function prepareRemoteIngressPrincipal(params: {
         return invalidate(error);
       }
     };
-    const checkPublication = () => {
-      try {
-        assertCurrent();
-      } catch {
-        /* The assertion already retired this grant. */
-      }
-    };
-    releaseProfiles = onUserProfilesChanged(checkPublication);
-    releaseRoles = onOperatorRolePolicyChanged(checkPublication);
-    signal.addEventListener("abort", release, { once: true });
+    signal.addEventListener("abort", prepared.release, { once: true });
     assertCurrent();
     return {
       signal,

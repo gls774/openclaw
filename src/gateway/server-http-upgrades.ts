@@ -25,6 +25,8 @@ import type { DesktopSessionRegistry } from "./desktop/session-registry.js";
 import { classifyWorkerGatewayPath } from "./gateway-http-route-contracts.js";
 import type { AuthorizedGatewayHttpRequest } from "./http-auth-utils.js";
 import {
+  assertRemoteControlUiIngressCurrent,
+  getRemoteControlUiIngressContext,
   markGatewayIngressTransport,
   prepareGatewayIngressAttribution,
   PROXY_ATTRIBUTION_GUIDANCE,
@@ -33,10 +35,6 @@ import {
   type GatewayUnattributableProxyReporter,
 } from "./ingress-attribution.js";
 import { normalizePluginNodeCapabilityScopedUrl } from "./plugin-node-capability.js";
-import {
-  assertRemoteControlUiIngressCurrent,
-  getRemoteControlUiIngressContext,
-} from "./remote-control-ui-context.js";
 import {
   getHttpAuthUtilsModule,
   getPluginNodeCapabilityAuthModule,

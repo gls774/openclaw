@@ -29,12 +29,12 @@ import {
   GatewayHttpRequestAuthorityError,
 } from "../http-request-authority.js";
 import type { AuthorizedGatewayHttpRequest } from "../http-utils.js";
-import { hasCurrentGatewayOperatorAccess } from "../operator-access-policy.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
   hasCurrentRemoteControlUiIngress,
-} from "../remote-control-ui-context.js";
+} from "../ingress-attribution.js";
+import { hasCurrentGatewayOperatorAccess } from "../operator-access-policy.js";
 import type { GatewayRequestContext, GatewayRequestOptions } from "../server-methods/types.js";
 import type { RemoteControlUiIngressContext } from "./client-identity-types.js";
 import {
@@ -207,7 +207,6 @@ function createPluginRouteRuntimeScope(params: {
   }
   return {
     pluginRegistry: params.registry,
-    ...(ingress ? { trackWork: ingress.trackWork } : {}),
     ...(requestAuth?.revalidate || ingress
       ? {
           revalidate: async () => {

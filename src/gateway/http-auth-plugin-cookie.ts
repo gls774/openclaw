@@ -23,11 +23,11 @@ import {
   bindHttpResponseAuthority,
   GatewayHttpRequestAuthorityError,
 } from "./http-request-authority.js";
-import { normalizeOperatorScopeList } from "./operator-scopes.js";
 import {
   getRemoteControlUiIngressContext,
   assertRemoteControlUiIngressCurrent,
-} from "./remote-control-ui-context.js";
+} from "./ingress-attribution.js";
+import { normalizeOperatorScopeList } from "./operator-scopes.js";
 import { resolveSharedGatewaySessionGeneration } from "./server/ws-shared-generation.js";
 
 type CookieRequestAuth = NonNullable<ReturnType<typeof authorizeControlUiPluginCookieRequest>>;

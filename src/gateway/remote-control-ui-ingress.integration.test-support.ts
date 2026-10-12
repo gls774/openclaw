@@ -6,11 +6,6 @@ import {
   signDevicePayload,
   type DeviceIdentity,
 } from "../infra/device-identity.js";
-import type {
-  GatewayControlUiIngressV2,
-  GatewayIngressPrincipalBindingV1,
-} from "../plugins/gateway-ingress.types.js";
-
 export const PNG_BYTES = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGO4E2DzHwAF3AJov2Ds8QAAAABJRU5ErkJggg==",
   "base64",
@@ -31,19 +26,14 @@ export type IngressFrame = {
   ok?: boolean;
   payload?: {
     nonce?: string;
-    type?: string;
     controlUiUrl?: string;
-    sandboxUrl?: string;
-    sandboxOrigin?: string;
     auth?: { method: string; role: string; scopes: string[]; deviceToken?: string };
     pending?: unknown[];
     paired?: Array<{
       deviceId: string;
       scopes: string[];
       approvedVia: string;
-      tokens: Array<{ role: string; scopes: string[]; revokedAtMs?: number }>;
     }>;
-    triggers?: string[];
   };
   error?: { code: string; message: string };
 };
@@ -57,8 +47,8 @@ export type Peer = {
 type ConnectOptions = {
   identity?: DeviceIdentity;
   auth?: { token?: string; password?: string; deviceToken?: string; bootstrapToken?: string };
-  scopes?: string[];
   role?: string;
+  scopes?: string[];
   owner?: boolean;
   profileId?: string;
   tamperSignature?: boolean;
@@ -174,66 +164,4 @@ export async function expectReadWriteWithoutAdmin(peer: Peer, trigger: string) {
     ok: false,
     error: { code: "FORBIDDEN", message: "missing scope: operator.admin" },
   });
-}
-
-export async function expectOwnerReadAccess(peer: Peer, sessionKey: string) {
-  expect(await request(peer, "users.self", {})).toMatchObject({
-    ok: true,
-    payload: { profile: { id: "gateway-owner" } },
-  });
-  const listed = await request(peer, "sessions.list", {
-    ownerId: "gateway-owner",
-    source: "sidebar",
-    rowMode: "compact",
-    limit: 20,
-  });
-  expect(listed.error).toBeUndefined();
-  expect(listed).toMatchObject({
-    ok: true,
-    payload: {
-      sessions: expect.arrayContaining([
-        expect.objectContaining({ key: sessionKey, displayName: "Owner ingress chat" }),
-      ]),
-    },
-  });
-}
-
-export async function expectIngressDenials(peer: Peer) {
-  // Owner attribution never grants the question/approval/pairing scope families.
-  expect(await request(peer, "question.list", {})).toMatchObject({
-    ok: false,
-    error: {
-      code: "FORBIDDEN",
-      message: "Session-scoped access requires a verified user profile.",
-    },
-  });
-  for (const [method, scope] of [
-    ["exec.approval.list", "operator.approvals"],
-    ["device.pair.list", "operator.pairing"],
-  ]) {
-    expect(await request(peer, method!, {})).toMatchObject({
-      ok: false,
-      error: { code: "FORBIDDEN", message: `missing scope: ${scope}` },
-    });
-  }
-}
-
-export async function expectUiCloseJoinsRpc(
-  ui: GatewayControlUiIngressV2,
-  binding: GatewayIngressPrincipalBindingV1,
-  pending: Promise<unknown>,
-  release: () => void,
-) {
-  const rejected = pending.catch((error: unknown) => error);
-  let closed = false;
-  const closing = ui.close().then(() => {
-    closed = true;
-  });
-  expect(await rejected).toBeInstanceOf(Error);
-  // The grant can serve another real request while the UI waits for its cancelled handler.
-  expect(await binding.request("voicewake.get", {})).toHaveProperty("triggers");
-  expect(closed).toBe(false);
-  release();
-  await closing;
-  expect(closed).toBe(true);
 }

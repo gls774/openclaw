@@ -1,8 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import type {
-  GatewayControlUiIngressFactoryV1,
-  GatewayControlUiIngressFactoryV2,
-} from "openclaw/plugin-sdk/gateway-ingress";
+import type { GatewayControlUiIngressFactoryV2 } from "openclaw/plugin-sdk/gateway-ingress";
 import type { PluginServiceSchedulerV1 } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -16,7 +13,7 @@ type ConsentOptions = {
   revoke: (grantId: string) => Promise<unknown>;
   state: Pick<RelayState, "approveGrant" | "assertGrantCurrent">;
   scheduler: Pick<PluginServiceSchedulerV1, "now" | "signal">;
-  controlUiIngress?: GatewayControlUiIngressFactoryV1 | GatewayControlUiIngressFactoryV2;
+  controlUiIngress?: GatewayControlUiIngressFactoryV2;
   config: () => ReturnType<PluginRuntime["config"]["current"]>;
   requireReady: () => void;
 };

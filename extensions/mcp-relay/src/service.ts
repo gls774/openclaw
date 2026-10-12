@@ -1,8 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type {
-  GatewayControlUiIngressFactoryV1,
-  GatewayControlUiIngressFactoryV2,
-} from "openclaw/plugin-sdk/gateway-ingress";
+import type { GatewayControlUiIngressFactoryV2 } from "openclaw/plugin-sdk/gateway-ingress";
 import type { PluginServiceSchedulerV1 } from "openclaw/plugin-sdk/plugin-entry";
 import type { PluginRuntime } from "openclaw/plugin-sdk/runtime-store";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
@@ -47,7 +44,7 @@ type ServiceOptions = {
   identity: Identity;
   relayUrl: string;
   gateway: { name: string; version: string };
-  controlUiIngress?: GatewayControlUiIngressFactoryV1 | GatewayControlUiIngressFactoryV2;
+  controlUiIngress?: GatewayControlUiIngressFactoryV2;
   config: () => ConfigSnapshot;
   operations: (
     op: string,

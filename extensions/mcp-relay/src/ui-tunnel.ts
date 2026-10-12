@@ -1,6 +1,6 @@
 import type {
   GatewayControlUiIngressPresentationOptionsV1,
-  GatewayControlUiIngressV1,
+  GatewayControlUiIngressV2,
   GatewayIngressMessage,
   GatewayIngressSocketV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
@@ -25,7 +25,7 @@ type Options = {
   open: (
     grantId: string,
     presentation: GatewayControlUiIngressPresentationOptionsV1,
-  ) => Promise<GatewayControlUiIngressV1>;
+  ) => Promise<GatewayControlUiIngressV2>;
   frameAncestors: readonly string[];
   scheduler: PluginServiceSchedulerV1;
   assertGrantCurrent: (grantId: string) => void;
@@ -36,7 +36,7 @@ type Grant = {
   id: string;
   publicOrigin: string;
   sandboxOrigin: string;
-  handle: Promise<GatewayControlUiIngressV1>;
+  handle: Promise<GatewayControlUiIngressV2>;
 };
 type StreamBase = {
   sid: string;

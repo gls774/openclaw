@@ -1,13 +1,10 @@
 export { GatewayControlUiIngressError } from "../plugins/gateway-ingress.types.js";
 export type {
   GatewayControlUiIngressErrorCode,
-  GatewayControlUiIngressFactoryV1,
   GatewayControlUiIngressFactoryV2,
-  GatewayControlUiIngressOpenOptionsV1,
   GatewayControlUiIngressOpenOptionsV2,
   GatewayControlUiIngressPresentationOptionsV1,
   GatewayControlUiIngressRequestV1,
-  GatewayControlUiIngressV1,
   GatewayControlUiIngressV2,
   GatewayControlUiIngressWebSocketRequestV1,
   GatewayIngressMessage,

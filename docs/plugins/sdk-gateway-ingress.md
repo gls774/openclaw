@@ -17,26 +17,24 @@ A plugin must check `capabilityVersion === 2` before calling `open()` or
 `bindPrincipal()`. An older host could otherwise ignore a person option and open
 an owner connection. If the capability is absent or older, report that OpenClaw
 needs an update and keep delegated access disabled; do not substitute a loopback
-connection or a synthetic Gateway client. The V1 type exports remain available
-for source imports, but the current factory requires an explicit `principal`.
+connection or a synthetic Gateway client. The factory requires an explicit `principal`.
 The factory capability version is separate from the Gateway wire protocol.
 
 ## Open a handle
 
 ```typescript
 import type {
-  GatewayControlUiIngressFactoryV1,
   GatewayControlUiIngressFactoryV2,
   GatewayIngressPrincipal,
 } from "openclaw/plugin-sdk/gateway-ingress";
 
 async function openRemoteUi(
-  factory: GatewayControlUiIngressFactoryV1 | GatewayControlUiIngressFactoryV2 | undefined,
+  factory: GatewayControlUiIngressFactoryV2 | undefined,
   principal: GatewayIngressPrincipal,
   signal: AbortSignal,
   assertCurrent: () => void,
 ) {
-  if (!factory || !("capabilityVersion" in factory) || factory.capabilityVersion !== 2) {
+  if (!factory || factory.capabilityVersion !== 2) {
     throw new Error("Update OpenClaw to enable principal-bound remote ingress.");
   }
   return factory.open({

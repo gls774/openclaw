@@ -17,22 +17,6 @@ export class GatewayControlUiIngressError extends Error {
   }
 }
 
-export type GatewayControlUiIngressOpenOptionsV1 = {
-  /** Plugin-owned grant identity; never an OAuth token. */
-  audienceId: string;
-  publicOrigin: string;
-  sandboxOrigin: string;
-  operatorScopeCeiling: readonly ("operator.read" | "operator.write")[];
-  frameAncestors: readonly string[];
-  signal: AbortSignal;
-  /** Revalidate the live plugin grant; a signed or unexpired token is insufficient. */
-  assertCurrent: () => void;
-};
-
-export interface GatewayControlUiIngressFactoryV1 {
-  open(options: GatewayControlUiIngressOpenOptionsV1): Promise<GatewayControlUiIngressV1>;
-}
-
 export type GatewayIngressPrincipal = { kind: "owner" } | { kind: "person"; profileId: string };
 
 /** The plugin owns consent, expiry, persistence, and revocation of this exact grant. */
@@ -68,11 +52,7 @@ export interface GatewayIngressPrincipalBindingV1 {
   close(): Promise<void>;
 }
 
-export interface GatewayControlUiIngressV2 extends GatewayControlUiIngressV1 {
-  requestGateway: GatewayIngressPrincipalBindingV1["request"];
-}
-
-/** Check this version before passing a person: V1 hosts do not understand principals. */
+/** Versioned principal-bound ingress supplied by an admitted plugin service. */
 export interface GatewayControlUiIngressFactoryV2 {
   readonly capabilityVersion: 2;
   open(options: GatewayControlUiIngressOpenOptionsV2): Promise<GatewayControlUiIngressV2>;
@@ -118,7 +98,7 @@ export interface GatewayPluginReadCookieV1 {
   kind: "native-assets" | "iframe-read";
 }
 
-export interface GatewayControlUiIngressV1 {
+export interface GatewayControlUiIngressV2 {
   readonly presentation: {
     readonly basePath: string;
     readonly publicOrigin: string;
@@ -133,6 +113,7 @@ export interface GatewayControlUiIngressV1 {
     protocol?: string;
     socket: GatewayIngressSocketV1;
   }>;
+  requestGateway: GatewayIngressPrincipalBindingV1["request"];
   /** Fence admission and abort transport; effect and publication guards reject stale work. */
   close(): Promise<void>;
 }

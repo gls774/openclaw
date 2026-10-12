@@ -1,6 +1,6 @@
 import {
   GatewayControlUiIngressError,
-  type GatewayControlUiIngressV1,
+  type GatewayControlUiIngressV2,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { codeHash } from "./protocol.js";
@@ -385,7 +385,7 @@ describe("MCP relay transport and authority", () => {
       request: async () => ({ response: new Response("person UI"), pluginReadCookies: [] }),
       openWebSocket: async () => ({ socket: new IngressSocket() }),
       close: vi.fn(async () => {}),
-    } satisfies GatewayControlUiIngressV1;
+    } satisfies Omit<GatewayControlUiIngressV2, "requestGateway">;
     const ingress = createPrincipalIngress(handle);
     const bind = ingress.factory.bindPrincipal.getMockImplementation()!;
     ingress.factory.bindPrincipal.mockImplementation(async (options) => {

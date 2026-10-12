@@ -3,7 +3,7 @@ import type { PluginRuntime } from "openclaw/plugin-sdk/core";
 import {
   GatewayControlUiIngressError,
   type GatewayControlUiIngressFactoryV2,
-  type GatewayControlUiIngressV1,
+  type GatewayControlUiIngressV2,
   type GatewayIngressPrincipalBindingV1,
   type GatewayIngressPrincipalOptionsV1,
   type GatewayIngressMessage,
@@ -185,7 +185,7 @@ class FakeRelaySocket extends EventEmitter implements RelaySocket {
   }
 }
 
-export function createPrincipalIngress(handle?: GatewayControlUiIngressV1) {
+export function createPrincipalIngress(handle?: Omit<GatewayControlUiIngressV2, "requestGateway">) {
   const bindings: {
     options: GatewayIngressPrincipalOptionsV1;
     binding: GatewayIngressPrincipalBindingV1;
@@ -396,21 +396,24 @@ export function createTunnelFixture() {
       basePath: "/control",
       operatorScopeCeiling: ["operator.read", "operator.write"],
     },
-    request: vi.fn<GatewayControlUiIngressV1["request"]>(async () => ({
+    request: vi.fn<GatewayControlUiIngressV2["request"]>(async () => ({
       response: new Response("index"),
       pluginReadCookies: [],
     })),
-    openWebSocket: vi.fn<GatewayControlUiIngressV1["openWebSocket"]>(async () => {
+    openWebSocket: vi.fn<GatewayControlUiIngressV2["openWebSocket"]>(async () => {
       const socket = new IngressSocket();
       sockets.push(socket);
       return { socket };
     }),
-    close: vi.fn<GatewayControlUiIngressV1["close"]>(async () => {
+    requestGateway: async () => {
+      throw new Error("Unexpected Gateway request");
+    },
+    close: vi.fn<GatewayControlUiIngressV2["close"]>(async () => {
       for (const socket of sockets) {
         socket.close(1001, "handle closed");
       }
     }),
-  } satisfies GatewayControlUiIngressV1;
+  } satisfies GatewayControlUiIngressV2;
   const open = vi.fn<ConstructorParameters<typeof UiTunnel>[0]["open"]>(async () => handle);
   const active = new Set(["gr_one"]);
   const tunnel = new UiTunnel({

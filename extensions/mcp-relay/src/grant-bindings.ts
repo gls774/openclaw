@@ -1,5 +1,4 @@
 import type {
-  GatewayControlUiIngressFactoryV1,
   GatewayControlUiIngressFactoryV2,
   GatewayIngressPrincipalBindingV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
@@ -7,9 +6,9 @@ import { RelayError } from "./protocol.js";
 import type { RelayState } from "./state.js";
 
 export function principalFactory(
-  factory: GatewayControlUiIngressFactoryV1 | GatewayControlUiIngressFactoryV2 | undefined,
+  factory: GatewayControlUiIngressFactoryV2 | undefined,
 ): GatewayControlUiIngressFactoryV2 {
-  if (!factory || !("capabilityVersion" in factory) || factory.capabilityVersion !== 2) {
+  if (!factory || factory.capabilityVersion !== 2) {
     throw new RelayError(
       "unavailable",
       "Update OpenClaw to enable principal-bound MCP and Control UI access.",

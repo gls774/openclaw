@@ -1199,7 +1199,12 @@ export async function createManagedOutgoingMediaBlocks(params: {
           try {
             const metadata = await resolvePlaybackMetadataForSource({
               sourcePath: opened.realPath,
-              sourceStat: opened.stat,
+              sourceStat: {
+                size: opened.stat.size,
+                mtimeMs: opened.stat.mtimeMs,
+                ctimeMs: opened.stat.ctimeMs,
+                exactIdentity: opened.exactIdentity,
+              },
               mimeType: savedOriginalContentType,
               kind: mediaKind,
               signal: params.abortSignal,
@@ -1454,7 +1459,12 @@ export async function handleManagedOutgoingMediaHttpRequest(
           if (isPlayback) {
             const playback = await resolvePlaybackTranscode({
               sourcePath: opened.realPath,
-              sourceStat: opened.stat,
+              sourceStat: {
+                size: opened.stat.size,
+                mtimeMs: opened.stat.mtimeMs,
+                ctimeMs: opened.stat.ctimeMs,
+                exactIdentity: opened.exactIdentity,
+              },
               mimeType: responseContentType,
               kind: mediaKind,
               signal: byteStream.signal,

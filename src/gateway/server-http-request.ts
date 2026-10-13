@@ -212,7 +212,8 @@ export function createGatewayHttpRequestHandler(
         respondNotFound(res);
         return undefined;
       }
-      if (classifyGatewayProbePath(requestPath) === "live") {
+      const probeKind = classifyGatewayProbePath(requestPath);
+      if (probeKind === "live") {
         await handleGatewayProbeRequest(
           req,
           res,
@@ -227,6 +228,9 @@ export function createGatewayHttpRequestHandler(
         return undefined;
       }
 
+      if (probeKind === "outside" || probeKind === "namespace") {
+        await opts.waitForRequestRuntime?.();
+      }
       const configSnapshot = loadGatewayConfig();
       const controlUiEnabled =
         opts.controlUiEnabled ?? configSnapshot.gateway?.controlUi?.enabled ?? true;

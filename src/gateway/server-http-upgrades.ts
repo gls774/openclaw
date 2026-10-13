@@ -174,6 +174,7 @@ export function attachGatewayUpgradeHandler(opts: {
   desktopSessionRegistry?: DesktopSessionRegistry;
   nodeDesktopStreamBroker?: NodeDesktopStreamBroker;
   getGatewayRequestContext?: () => GatewayRequestContext | undefined;
+  waitForRequestRuntime?: () => Promise<void>;
   isStartupPending?: () => boolean;
   ingressTransport?: GatewayIngressTransport;
   reportUnattributableProxy?: GatewayUnattributableProxyReporter;
@@ -201,6 +202,7 @@ export function attachGatewayUpgradeHandler(opts: {
       markGatewayIngressTransport(req, opts.ingressTransport ?? { kind: "ordinary" });
     }
     const handleUpgrade = async () => {
+      await opts.waitForRequestRuntime?.();
       const configSnapshot = getRuntimeConfig();
       assertRemoteControlUiIngressCurrent(remoteIngress);
       if (remoteIngress) {

@@ -124,7 +124,12 @@ export async function resolveAssistantMediaAvailability(
       mimeType && (mediaKind === "audio" || mediaKind === "video")
         ? await resolvePlaybackMetadataForSource({
             sourcePath: opened.realPath,
-            sourceStat: opened.stat,
+            sourceStat: {
+              size: opened.stat.size,
+              mtimeMs: opened.stat.mtimeMs,
+              ctimeMs: opened.stat.ctimeMs,
+              exactIdentity: opened.exactIdentity,
+            },
             mimeType,
             kind: mediaKind,
             signal,

@@ -53,6 +53,7 @@ export type GatewayHttpServerOptions = {
   getRuntimeConfig?: () => OpenClawConfig;
   getGatewayRequestContext?: () => GatewayRequestContext | undefined;
   httpRequestLifetime?: GatewayHttpRequestLifetime;
+  waitForRequestRuntime?: () => Promise<void>;
   isStartupPluginRuntimeReady?: () => boolean;
   isTerminalEnabled?: () => boolean;
   tlsOptions?: TlsOptions;

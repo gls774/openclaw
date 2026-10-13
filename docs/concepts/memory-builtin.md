@@ -165,7 +165,8 @@ after an upgrade or restart, without delaying Gateway readiness. Failed
 preparation reports the database's repair guidance. Watched file changes can
 then update the index without a search or agent turn. Retiring an
 instance closes its managers, including file watchers, timers, and session
-listeners. Plugin reload also stops and restarts the retained Memory Core
+listeners. A session startup scan still in progress stops after its current
+step, so disabling or replacing the plugin does not wait for it. Plugin reload also stops and restarts the retained Memory Core
 service around publication, so its managers use the current embedding providers,
 including providers loaded on demand, without waiting for a search or turn. If
 reload fails after draining managers, recovery restarts their previous services
@@ -177,12 +178,34 @@ When the index identity reports an OpenClaw chunking-implementation change,
 a normal or CLI search rebuilds it before returning results. The rebuild uses
 the agent's current embedding settings; status inspection remains read-only.
 
-Search-triggered maintenance applies pending memory and session changes
-incrementally while searches remain available. A failed full rebuild retains
+Search-triggered maintenance applies pending memory-file changes incrementally
+while searches remain available. Session transcript indexing waits until the
+agent has had no transcript changes or running turns for 30 seconds. While the
+agent is idle, continuous transcript changes defer indexing for at most about five
+minutes, plus embedding time. Running and back-to-back turns can defer it longer:
+each return to idle starts a fresh quiet period. One pass covers the agent's pending
+sessions, sharing transcript preparation, embedding-cache reads, and bounded
+publication transactions. If a turn starts during a pass, indexing finishes its
+current bounded group and resumes after the next quiet period.
+
+New session content becomes searchable after that delay. The current turn already
+has its own content in context; `memory_search` does not force a transcript flush.
+Graceful shutdown does not flush queued indexing. On the next startup, incremental
+catch-up resumes from each source's indexed sequence, including rewrites and
+compaction. A failed full rebuild retains
 its full-retry state; ordinary dirty content does not itself force a rebuild.
+Growing session transcripts retain unchanged indexed chunks and embed only new
+or changed chunks, even when the embedding cache is disabled. An explicit full
+rebuild still replaces the complete index.
 If a memory file changes or disappears during indexing, only that file's
 unfinished work is retried incrementally. Other files finish indexing, and
 the changed file's obsolete chunks are not published.
+
+Automatic full-rebuild retries wait 30 seconds after a failure. Repeated
+failures double that delay up to 30 minutes; a successful rebuild resets it.
+Searches keep reading the published index, and targeted session updates can
+still publish when its identity is valid. Explicit CLI repair bypasses the
+process-local cooldown.
 
 When native file watching is unavailable, Memory Core uses background polling
 with a 30-second default interval, including when polling is explicitly enabled
@@ -223,8 +246,9 @@ not total disk usage: embedding cache, FTS/vector tables, SQLite overhead, and
 WAL/free pages are excluded.
 
 Chunk and embedding-cache vectors use little-endian 64-bit floating-point
-BLOBs. The software search fallback reads these full-precision vectors even
-when the optional sqlite-vec accelerator is unavailable; sqlite-vec keeps its
+BLOBs. The software search fallback scores these full-precision BLOBs directly
+in a worker, without allocating a numeric array per chunk, even when the
+optional sqlite-vec accelerator is unavailable; sqlite-vec keeps its
 separate 32-bit vector index. The keyword index uses each chunk's stable integer
 identity, so edits and deletion update the corresponding FTS rows directly.
 

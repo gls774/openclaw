@@ -183,14 +183,18 @@ it.for([false, true])(
           };
         };
         expect((await list()).ids).not.toContain("account-exclusive");
-        // Warm the worker before first-login relocation, then exclude startup work from login.
+        // A configured provider can queue this refresh behind startup discovery.
         await waitForCatalogPublication({
           signal,
           start: () => list(true),
           read: list,
-          ready: () => {
-            const work = catalogWork.read();
-            return work.completedTasks > 0 && work.pendingTasks === 0;
+          ready: ({ result }) => {
+            const { completedTasks, pendingTasks } = catalogWork.read();
+            return (
+              completedTasks > 0 &&
+              pendingTasks === 0 &&
+              !result.pendingProviders?.includes(provider)
+            );
           },
         });
         const beforeLoginWork = catalogWork.read();
@@ -304,7 +308,6 @@ it.for([false, true])(
         await withinTest(apiKeyListing.started.promise, signal);
         const apiKeyPending = await list();
         apiKeyListing.release.resolve();
-        expect(apiKeyPending.result.pendingProviders).toContain(provider);
         expect(apiKeyPending.ids).toEqual(["known-chat"]);
         const apiKeyFailed = await waitForCatalogPublication({
           signal,

@@ -20,6 +20,7 @@ import {
   routeResolverFactory,
   subscriptionRoute,
 } from "./model-auth-availability.test-support.js";
+import { projectClaudeCliNativeCatalog } from "./model-catalog-cli-wildcard.js";
 import {
   createModelCatalogDecisions,
   prepareModelCatalogDecisions,
@@ -258,98 +259,56 @@ describe("captured model decisions", () => {
     vi.useRealTimers();
   });
 
-  it.each([true, false])(
-    "preserves provider auth for a non-CLI harness (authenticated=%s)",
-    async (authenticated) => {
-      const model = { provider: "github-copilot", id: "fixture-model", name: "Fixture model" };
-      const owner = createModelCatalogDecisions({
-        cfg: { plugins: { entries: { copilot: { enabled: true } } } },
-        agentId: "main",
-        agentDir: "/tmp/copilot-agent",
-        workspaceDir: "/tmp/copilot-workspace",
-        snapshot: { entries: [model], routeVariants: [model] },
-        metadataSnapshot: createPluginMetadataSnapshotFixture({
-          plugins: [{ id: "github-copilot", providers: ["github-copilot"] }, { id: "copilot" }],
-        }),
-        preparedAuthStore: {
-          version: 1,
-          profiles: authenticated
-            ? {
-                "github-copilot:work": {
-                  type: "token",
-                  provider: "github-copilot",
-                  token: "fixture-token",
-                },
-              }
-            : {},
+  it("preserves provider auth for an authenticated non-CLI harness", async () => {
+    const model = { provider: "github-copilot", id: "fixture-model", name: "Fixture model" };
+    const owner = createModelCatalogDecisions({
+      cfg: { plugins: { entries: { copilot: { enabled: true } } } },
+      agentId: "main",
+      agentDir: "/tmp/copilot-agent",
+      workspaceDir: "/tmp/copilot-workspace",
+      snapshot: { entries: [model], routeVariants: [model] },
+      metadataSnapshot: createPluginMetadataSnapshotFixture({
+        plugins: [{ id: "github-copilot", providers: ["github-copilot"] }, { id: "copilot" }],
+      }),
+      preparedAuthStore: {
+        version: 1,
+        profiles: {
+          "github-copilot:work": {
+            type: "token",
+            provider: "github-copilot",
+            token: "fixture-token",
+          },
         },
-        preparedSyntheticAuthComplete: true,
-        pluginRegistry: harnessRegistry("copilot"),
-        isCurrent: () => true,
-      });
-      const choices = owner.runtimeChoices(model);
-      if (authenticated) {
-        expect(owner.evaluateEntry(model, undefined, "copilot")).toMatchObject({
-          availability: true,
-          selectedProfileId: "github-copilot:work",
-        });
-        expect(choices).toContain("copilot");
-      } else {
-        expect(choices).toBeUndefined();
-      }
-    },
-  );
+      },
+      preparedSyntheticAuthComplete: true,
+      pluginRegistry: harnessRegistry("copilot"),
+      isCurrent: () => true,
+    });
+    const choices = owner.runtimeChoices(model);
+    expect(owner.evaluateEntry(model, undefined, "copilot")).toMatchObject({
+      availability: true,
+      selectedProfileId: "github-copilot:work",
+    });
+    expect(choices).toContain("copilot");
+  });
 
-  it.each([undefined, "auto"])(
-    "keeps native availability and runtime together under %s policy",
-    async (runtime) => {
-      vi.spyOn(openaiRoutes, "resolveOpenAIModelRoutes").mockImplementation(({ api }) => ({
-        ...dualRoutes,
-        defaultRuntimeId: api ? "openclaw" : "codex",
-      }));
-      const cfg: OpenClawConfig = {
-        plugins: config.plugins,
-        ...(runtime
-          ? {
-              agents: {
-                defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: runtime } } } },
-              },
-            }
-          : {}),
-      };
-      const owner = nativeOwner(true, true, () => true, cfg);
-      const evaluation = owner.evaluateEntry(entry);
-      expect(evaluation).toMatchObject({
-        availability: true,
-        runtimeAuth: { id: "codex", source: "native" },
-      });
-      expect(
-        resolveCatalogDecisionRuntime({
-          cfg,
-          agentId: "main",
-          entry,
-          evaluation,
-          pluginRegistry: owner.pluginRegistry,
-        }),
-      ).toEqual({ id: "codex", source: "implicit" });
-      expect(resolveCatalogDecisionRuntime({ cfg, agentId: "main", entry, evaluation })).toEqual({
-        id: "codex",
-        source: "implicit",
-      });
-    },
-  );
-
-  it("keeps an explicit host runtime from borrowing native authentication", async () => {
+  it("keeps native availability and runtime together under auto policy", async () => {
+    vi.spyOn(openaiRoutes, "resolveOpenAIModelRoutes").mockImplementation(({ api }) => ({
+      ...dualRoutes,
+      defaultRuntimeId: api ? "openclaw" : "codex",
+    }));
     const cfg: OpenClawConfig = {
       plugins: config.plugins,
       agents: {
-        defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: "openclaw" } } } },
+        defaults: { models: { "openai/gpt-5.4": { agentRuntime: { id: "auto" } } } },
       },
     };
     const owner = nativeOwner(true, true, () => true, cfg);
     const evaluation = owner.evaluateEntry(entry);
-    expect(evaluation.availability).not.toBe(true);
-    expect(evaluation.runtimeAuth).toBeUndefined();
+    expect(evaluation).toMatchObject({
+      availability: true,
+      runtimeAuth: { id: "codex", source: "native" },
+    });
     expect(
       resolveCatalogDecisionRuntime({
         cfg,
@@ -358,7 +317,11 @@ describe("captured model decisions", () => {
         evaluation,
         pluginRegistry: owner.pluginRegistry,
       }),
-    ).toEqual({ id: "openclaw", source: "model" });
+    ).toEqual({ id: "codex", source: "implicit" });
+    expect(resolveCatalogDecisionRuntime({ cfg, agentId: "main", entry, evaluation })).toEqual({
+      id: "codex",
+      source: "implicit",
+    });
   });
 
   it("keeps ordinary host authentication distinct from native login", async () => {
@@ -766,7 +729,7 @@ describe("catalog decisions with prepared CLI auth directories", () => {
     });
   });
 
-  it("lights up the Claude CLI sign-in wildcard only for models the Claude CLI catalog lists", async () => {
+  it.each(["ready", "unavailable"] as const)("keeps CLI menu on %s", async (status) => {
     await withOpenClawTestState({ layout: "state-only" }, async (state) => {
       cliBackendsTesting.setDepsForTest({
         resolvePluginSetupCliBackend: () => undefined,
@@ -804,10 +767,17 @@ describe("catalog decisions with prepared CLI auth directories", () => {
           workspaceDir: state.workspaceDir,
           snapshot: {
             entries: [
-              { provider: "claude-cli", id: "claude-listed", name: "Listed" },
+              { provider: "claude-cli", id: "claude-stale", name: "Stale static row" },
               { provider: "google-gemini-cli", id: "gemini-listed", name: "Listed" },
             ],
             routeVariants: [],
+            providerOutcomes: [
+              {
+                provider: "claude-cli",
+                status,
+                listedModelIds: ["claude-listed"],
+              },
+            ],
           },
           metadataSnapshot: cliMetadata,
           preparedAuthStore: {
@@ -827,6 +797,7 @@ describe("catalog decisions with prepared CLI auth directories", () => {
         owner.evaluateEntry({ provider, id }).availability;
 
       expect(availability("anthropic", "claude-listed")).toBe(true);
+      expect(availability("anthropic", "claude-stale")).toBe(false);
       // API-only rows stay out of a Claude CLI picker without a sign-in prompt.
       const apiOnly = owner.evaluateEntry({ provider: "anthropic", id: "claude-mythos-5" });
       expect(apiOnly.availability).toBe(false);
@@ -852,4 +823,53 @@ describe("catalog decisions with prepared CLI auth directories", () => {
       ).toBe(false);
     });
   });
+});
+
+it("projects exact native IDs and effort levels without expanding a restricted menu", () => {
+  const native: ModelCatalogEntry = {
+    provider: "claude-cli",
+    id: "claude-future",
+    name: "Future",
+    reasoning: true,
+    thinkingLevelMap: { low: "low", max: "max" },
+  };
+  const donor: ModelCatalogEntry = {
+    provider: "anthropic",
+    id: "claude-future",
+    name: "Hosted metadata",
+    contextWindow: 456_000,
+    thinkingLevelMap: { high: "high" },
+  };
+  const hostedOnly = { provider: "anthropic", id: "claude-hosted-only", name: "Hosted only" };
+  const snapshot = {
+    entries: [
+      native,
+      donor,
+      hostedOnly,
+      { provider: "claude-cli", id: "claude-stale", name: "Stale" },
+    ],
+    routeVariants: [],
+    staticEntries: [donor, hostedOnly],
+    providerOutcomes: [
+      {
+        provider: "claude-cli",
+        status: "ready" as const,
+        listedModelIds: [native.id],
+      },
+    ],
+  };
+  const projected = projectClaudeCliNativeCatalog(snapshot, true);
+  expect(projected.entries.find((row) => row.provider === "anthropic")).toMatchObject({
+    id: native.id,
+    contextWindow: 456_000,
+    thinkingLevelMap: native.thinkingLevelMap,
+  });
+  expect(projected.entries).toHaveLength(1);
+  expect(projected.entries.every((row) => row.provider === "anthropic")).toBe(true);
+  expect(projected.staticEntries).toEqual([]);
+  expect(projected.entries.some((row) => row.id === "claude-stale")).toBe(false);
+  expect(projectClaudeCliNativeCatalog(snapshot, false).entries).toContain(donor);
+  expect(
+    projectClaudeCliNativeCatalog({ ...snapshot, providerOutcomes: [] }, true).entries,
+  ).toEqual([donor, hostedOnly]);
 });

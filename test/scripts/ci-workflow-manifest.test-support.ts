@@ -95,6 +95,7 @@ export function runCiManifestFixture(options: {
   missingTargetFiles?: string[];
   uiE2eProjectsCapability?: boolean;
   uiReleaseTier?: boolean;
+  uiTestGroupsSource?: string;
   uiE2eSelectorSource?: string;
   uiRealGatewayShards?: boolean;
   remoteTagRefs?: Record<string, string>;
@@ -278,7 +279,8 @@ export function runCiManifestFixture(options: {
       copyFileSync("test/vitest/vitest.ui-paths.mjs", uiPaths);
       appendFileSync(
         path.join(scriptsDir, "ci-node-test-plan.mts"),
-        `\nexport const createUiTestShardGroups = (options) => ({
+        options.uiTestGroupsSource ??
+          `\nexport const createUiTestShardGroups = (options) => ({
           ui: [{configs: ["ui/vitest.config.ts"], shard_name: "ui", includePatterns: ${JSON.stringify(uiTargets)}, env: {fixtureTier: JSON.stringify(options)}}],
           e2e: [{configs: ["test/vitest/vitest.ui-e2e.config.ts"], shard_name: "e2e", includePatterns: options.uiE2eFiles ? [...options.uiE2eFiles, ...${JSON.stringify(CI_MANIFEST_FIXTURE_TARGETS.real)}] : ${JSON.stringify(e2eTargets)}, env: {fixtureTier: JSON.stringify(options)}}],
         });\n`,
@@ -432,7 +434,7 @@ export function runCiManifestFixture(options: {
         path.join(scriptsDir, "ci-changed-node-test-plan.mts"),
         options.changedPlannerSource ??
           `
-          export { hasQaSmokeAffectingChange } from ${JSON.stringify(pathToFileURL(path.resolve("scripts/lib/ci-changed-node-test-plan.mts")).href)};
+          export { hasQaSmokeAffectingChange } from ${JSON.stringify(pathToFileURL(path.resolve("scripts/lib/ci-qa-smoke-scope.mts")).href)};
           export const createChangedNodeTestShards = (changedPaths, options = {}) => {
             console.log("changed-node-plan-options:" + JSON.stringify(options));
             if (options.releaseFastLane && changedPaths.includes("scripts/lib/ci-node-test-plan.mts")) {

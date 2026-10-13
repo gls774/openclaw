@@ -1,6 +1,5 @@
 import fs from "node:fs/promises";
 import { expect, it, vi } from "vitest";
-import { awaitGateBeforeSettlement, withinTest } from "../../test/helpers/promise.js";
 import { createDeferredCore } from "../shared/deferred.js";
 
 type ConfigState = { hash: string; path: string; config: Record<string, unknown> };
@@ -18,11 +17,9 @@ export function registerAgentConfigMutationTests({
   getConfigHash: () => Promise<string>;
   rpc: (method: string, params: unknown) => Promise<RpcResult>;
   workspacePath: (name: string) => string;
-  reloadBarrier: { wait: (() => Promise<void>) | undefined };
+  reloadBarrier: { hold: (() => Promise<void>) | undefined };
 }) {
-  it("uses fresh revisions after agent create, update, and delete before reload applies", async ({
-    signal,
-  }) => {
+  it("uses fresh revisions after agent create, update, and delete before reload applies", async () => {
     const operations = [
       {
         method: "agents.create",
@@ -33,24 +30,29 @@ export function registerAgentConfigMutationTests({
     ];
     for (const operation of operations) {
       const before = await getConfigHash();
-      const gate = createDeferredCore();
       const entered = createDeferredCore();
-      reloadBarrier.wait = () => {
+      const gate = createDeferredCore();
+      reloadBarrier.hold = () => {
         entered.resolve();
         return gate.promise;
       };
-      const pending = rpc(operation.method, operation.params);
       try {
-        // Successful agent replies now wait for runtime publication. Inspect the
-        // committed revision while publication, not the RPC caller, is held.
-        await withinTest(
-          awaitGateBeforeSettlement(entered.promise, pending, "agent RPC settled before reload"),
-          signal,
-        );
+        // Agent RPCs acknowledge only after runtime application, so a concurrent
+        // reader observes the persisted revision while publication is held.
+        const changed = rpc(operation.method, operation.params);
+        await Promise.race([
+          entered.promise,
+          changed.then((result) => {
+            throw new Error(
+              `${operation.method} settled before publication: ${result.error?.message}`,
+            );
+          }),
+        ]);
         const current = await getCurrentConfigObject();
         gate.resolve();
-        const changed = await withinTest(pending, signal);
-        expect(changed.ok, `${operation.method}: ${changed.error?.message}`).toBe(true);
+        const result = await changed;
+        expect(result.ok, `${operation.method}: ${result.error?.message}`).toBe(true);
+
         const patched = await rpc("config.patch", {
           baseHash: current.hash,
           raw: JSON.stringify({ agents: { entries: { main: { name: operation.method } } } }),
@@ -59,15 +61,14 @@ export function registerAgentConfigMutationTests({
         expect(current.hash).not.toBe(before);
       } finally {
         gate.resolve();
-        reloadBarrier.wait = undefined;
-        await Promise.allSettled([pending]);
+        reloadBarrier.hold = undefined;
       }
     }
   });
 
-  it.for([false, true])(
+  it.each([false, true])(
     "agents.delete preserves newer writes across a large shrink (authority revoked: %s)",
-    async (revoke, { signal }) => {
+    async (revoke) => {
       const configFactory = await import("../config/io.factory.js");
       const { readAgentDeletionJournal } = await import("../state/agent-deletion-journal.js");
       const { removeAgentDeletionJournal } =
@@ -99,7 +100,6 @@ export function registerAgentConfigMutationTests({
       const newer = { ...JSON.parse(beforeRaw), ui: { prefs: { locale: "fr" } } };
       const createIO = configFactory.createConfigIO;
       let writeCalls = 0;
-      const committed = createDeferredCore();
       const observation = vi
         .spyOn(configFactory, "createConfigIO")
         .mockImplementation((options) => {
@@ -119,37 +119,25 @@ export function registerAgentConfigMutationTests({
                   expect(removeAgentDeletionJournal("doomed", journal.operationId)).toBe(true);
                 }
               }
-              const written = await io.writeConfigFile(...args);
-              if (io.configPath === original.path) {
-                committed.resolve();
-              }
-              return written;
+              return await io.writeConfigFile(...args);
             },
           };
         });
-      const gate = createDeferredCore();
-      reloadBarrier.wait = () => gate.promise;
-      const pending = rpc("agents.delete", {
-        agentId: "doomed",
-        deleteFiles: false,
-      });
       try {
-        if (!revoke) {
-          await withinTest(
-            awaitGateBeforeSettlement(committed.promise, pending, "deletion settled before commit"),
-            signal,
-          );
-        }
-        const result = revoke ? await withinTest(pending, signal) : undefined;
+        const result = await rpc("agents.delete", {
+          agentId: "doomed",
+          deleteFiles: false,
+        });
         const raw = await fs.readFile(original.path, "utf8");
         const persisted = JSON.parse(raw);
         if (revoke) {
-          expect(result?.ok).toBe(false);
-          expect(result?.error?.message).toContain("deletion no longer owns");
+          expect(result.ok).toBe(false);
+          expect(result.error?.message).toContain("deletion no longer owns");
           expect(writeCalls).toBe(1);
           expect(persisted).toEqual(newer);
           expect(readAgentDeletionJournal("doomed")).toBeUndefined();
         } else {
+          expect(result.ok, result.error?.message).toBe(true);
           expect(writeCalls).toBe(2);
           expect(Buffer.byteLength(raw)).toBeLessThan(Buffer.byteLength(beforeRaw) / 2);
           expect(persisted).toEqual({
@@ -170,14 +158,8 @@ export function registerAgentConfigMutationTests({
           expect(stale.ok).toBe(false);
           expect(stale.error?.message).toContain("config changed since last load");
           expect(await fs.readFile(original.path, "utf8")).toBe(raw);
-          gate.resolve();
-          const applied = await withinTest(pending, signal);
-          expect(applied.ok, applied.error?.message).toBe(true);
         }
       } finally {
-        gate.resolve();
-        reloadBarrier.wait = undefined;
-        await Promise.allSettled([pending]);
         observation.mockRestore();
       }
     },

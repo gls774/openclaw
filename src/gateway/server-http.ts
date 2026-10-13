@@ -419,7 +419,8 @@ export function createGatewayHttpServer(opts: {
       const addAdmittedStage = (enabled: boolean, stage: GatewayHttpRequestStage) =>
         addRequestStage(enabled, stage, true);
 
-      addRequestStage(classifyWorkerGatewayPath(scopedRequestPath) !== "outside", () => {
+      const workerGatewayRoute = classifyWorkerGatewayPath(scopedRequestPath);
+      addRequestStage(workerGatewayRoute !== "outside", () => {
         respondNotFound(res);
         return true;
       });

@@ -38,6 +38,8 @@ import {
   usePeer,
   type Peer,
   type IngressFrame,
+  TRUSTED_PROXY,
+  TEAM_ROLES,
 } from "./remote-control-ui-ingress.integration.test-support.js";
 import { dispatchGatewayRequestInProcess } from "./server-in-process-dispatch.js";
 import { coreGatewayHandlers } from "./server-methods/core-handlers.js";
@@ -48,24 +50,6 @@ import type { GatewayClientRegistry } from "./server/client-registry.js";
 const { default: mcpRelayPlugin } = await loadBundledPluginFacade<{
   default: Required<Pick<OpenClawPluginDefinition, "register">>;
 }>({ pluginId: "mcp-relay", artifactBasename: "index.js" });
-
-export const TRUSTED_PROXY = {
-  userHeader: "cf-access-authenticated-user-email",
-  requiredHeaders: ["cf-access-jwt-assertion"],
-};
-export const TEAM_ROLES: NonNullable<NonNullable<OpenClawConfig["gateway"]>["roles"]> = {
-  default: "reader",
-  definitions: {
-    admin: { scopes: ["operator.admin"], agents: "*", sessions: { others: "write" } },
-    reader: { scopes: ["operator.read"], agents: "*", sessions: { others: "none" } },
-    policy: {
-      scopes: ["operator.admin"],
-      agents: "*",
-      sessions: { others: "write" },
-      accessPolicyPlugin: "unavailable-policy-fixture",
-    },
-  },
-};
 
 type RelayFrame = {
   type: string;

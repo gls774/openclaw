@@ -1,11 +1,30 @@
 import { expect } from "vitest";
 import { buildDeviceAuthPayloadV3 } from "../../packages/gateway-client/src/device-auth.js";
 import { PROTOCOL_VERSION } from "../../packages/gateway-protocol/src/version.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   publicKeyRawBase64UrlFromPem,
   signDevicePayload,
   type DeviceIdentity,
 } from "../infra/device-identity.js";
+export const TRUSTED_PROXY = {
+  userHeader: "cf-access-authenticated-user-email",
+  requiredHeaders: ["cf-access-jwt-assertion"],
+};
+export const TEAM_ROLES: NonNullable<NonNullable<OpenClawConfig["gateway"]>["roles"]> = {
+  default: "reader",
+  definitions: {
+    admin: { scopes: ["operator.admin"], agents: "*", sessions: { others: "write" } },
+    reader: { scopes: ["operator.read"], agents: "*", sessions: { others: "none" } },
+    policy: {
+      scopes: ["operator.admin"],
+      agents: "*",
+      sessions: { others: "write" },
+      accessPolicyPlugin: "unavailable-policy-fixture",
+    },
+  },
+};
+
 export const PNG_BYTES = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGO4E2DzHwAF3AJov2Ds8QAAAABJRU5ErkJggg==",
   "base64",

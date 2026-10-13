@@ -41,13 +41,11 @@ import {
   expectReadWriteWithoutAdmin,
   type IngressFrame,
   type Peer,
-} from "./remote-control-ui-ingress.integration.test-support.js";
-import { createGatewayControlUiIngressFactory } from "./remote-control-ui-ingress.js";
-import {
-  expectMcpRelayPrincipalAuthority,
   TRUSTED_PROXY,
   TEAM_ROLES,
-} from "./remote-control-ui-mcp-relay.test-support.js";
+} from "./remote-control-ui-ingress.integration.test-support.js";
+import { createGatewayControlUiIngressFactory } from "./remote-control-ui-ingress.js";
+import { expectMcpRelayPrincipalAuthority } from "./remote-control-ui-mcp-relay.test-support.js";
 import { GatewayConnectionWork } from "./server-connection-work.js";
 import { MAX_PREAUTH_PAYLOAD_BYTES } from "./server-constants.js";
 import { getControlUiModule } from "./server-http-modules.js";

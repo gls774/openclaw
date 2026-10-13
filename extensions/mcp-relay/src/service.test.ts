@@ -71,7 +71,7 @@ describe("MCP relay transport and authority", () => {
       if (code === "closed") {
         await binding.close();
       } else {
-        vi.mocked(binding.openControlUi).mockRejectedValue(
+        vi.spyOn(binding, "openControlUi").mockRejectedValue(
           new GatewayControlUiIngressError(code, "Gateway authentication is unsupported."),
         );
       }

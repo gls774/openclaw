@@ -9,7 +9,7 @@ import type { RelayState } from "./state.js";
 export function isRetiredBindingError(error: unknown): error is GatewayControlUiIngressError {
   return (
     error instanceof GatewayControlUiIngressError &&
-    (error.code === "closed" || error.code === "forbidden")
+    (error.code === "closed" || error.code === "forbidden" || error.code === "unsupported-auth")
   );
 }
 

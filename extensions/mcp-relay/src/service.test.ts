@@ -52,28 +52,38 @@ async function createGrant(f: Awaited<ReturnType<typeof fixture>>, grantId = "gr
 }
 
 describe("MCP relay transport and authority", () => {
-  it("reopens a retired MCP binding after the first UI admission fails", async () => {
-    const ingress = createPrincipalIngress({
-      presentation: { ...ORIGINS, basePath: "/control", operatorScopeCeiling: ["operator.read"] },
-      request: async () => ({ response: new Response("UI"), pluginReadCookies: [] }),
-      openWebSocket: async () => ({ socket: new IngressSocket() }),
-      close: async () => {},
-    });
-    const f = await fixture(undefined, { controlUiIngress: ingress.factory });
-    await createGrant(f);
-    await f.ready(f.socket, uiCapability);
-    expect(
-      await f.request({ id: "status", op: "status", grantId: "gr_one", params: {} }),
-    ).toMatchObject({ ok: true });
-    await ingress.bindings[0]!.binding.close();
-    f.socket.receive(HTTP);
-    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.error", code: "unavailable" });
-    f.socket.receive({ ...HTTP, sid: "fresh-ui" });
-    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.head", status: 200 });
-    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.body", b64: "VUk=" });
-    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.body", more: false });
-    expect(ingress.factory.bindPrincipal).toHaveBeenCalledTimes(2);
-  });
+  it.each(["closed", "unsupported-auth"] as const)(
+    "reopens a retired MCP binding after %s UI admission fails",
+    async (code) => {
+      const ingress = createPrincipalIngress({
+        presentation: { ...ORIGINS, basePath: "/control", operatorScopeCeiling: ["operator.read"] },
+        request: async () => ({ response: new Response("UI"), pluginReadCookies: [] }),
+        openWebSocket: async () => ({ socket: new IngressSocket() }),
+        close: async () => {},
+      });
+      const f = await fixture(undefined, { controlUiIngress: ingress.factory });
+      await createGrant(f);
+      await f.ready(f.socket, uiCapability);
+      expect(
+        await f.request({ id: "status", op: "status", grantId: "gr_one", params: {} }),
+      ).toMatchObject({ ok: true });
+      const binding = ingress.bindings[0]!.binding;
+      if (code === "closed") {
+        await binding.close();
+      } else {
+        vi.mocked(binding.openControlUi).mockRejectedValue(
+          new GatewayControlUiIngressError(code, "Gateway authentication is unsupported."),
+        );
+      }
+      f.socket.receive(HTTP);
+      expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.error", code: "unavailable" });
+      f.socket.receive({ ...HTTP, sid: "fresh-ui" });
+      expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.head", status: 200 });
+      expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.body", b64: "VUk=" });
+      expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.body", more: false });
+      expect(ingress.factory.bindPrincipal).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it.each([false, true])("fails an overloaded UI send (saturated=%s)", async (saturated) => {
     const socket = new IngressSocket();

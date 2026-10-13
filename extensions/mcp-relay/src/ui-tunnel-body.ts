@@ -3,6 +3,7 @@ import { UiTunnelError } from "./ui-tunnel-protocol.js";
 export class UiRequestBody {
   readonly stream: ReadableStream<Uint8Array>;
   readonly #controller: ReadableStreamDefaultController<Uint8Array>;
+  #receivedBytes = 0;
   #ended = false;
   #hasBody = false;
 
@@ -26,6 +27,10 @@ export class UiRequestBody {
   push(bytes: Uint8Array, more: boolean): void {
     if (this.#ended) {
       throw new UiTunnelError("invalid", "The HTTP request body is already complete.");
+    }
+    this.#receivedBytes += bytes.byteLength;
+    if (this.#receivedBytes > 100 * 1024 * 1024) {
+      throw new UiTunnelError("limit_exceeded", "HTTP request bodies must not exceed 100 MiB.");
     }
     this.#hasBody ||= bytes.byteLength > 0 || more;
     if (bytes.byteLength) {

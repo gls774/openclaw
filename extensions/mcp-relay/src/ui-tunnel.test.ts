@@ -35,6 +35,33 @@ async function response(f: ReturnType<typeof createTunnelFixture>) {
 }
 
 describe("Control UI relay tunnel", () => {
+  it("limits queued upload bytes before core admission finishes", async () => {
+    const f = setup();
+    const admission = Promise.withResolvers<typeof f.handle>();
+    vi.mocked(f.open).mockReturnValue(admission.promise);
+    const b64 = Buffer.alloc(512 * 1024).toString("base64");
+    try {
+      await f.receive({ ...HTTP, method: "POST", b64, more: true });
+      for (let index = 1; index < 200; index++) {
+        await f.receive({ type: "ui.http.body", sid: HTTP.sid, b64, more: true });
+      }
+      expect(f.frames.values).toEqual([]);
+      await f.receive({ type: "ui.http.body", sid: HTTP.sid, b64: "AA==", more: false });
+      expect(f.frames.values).toHaveLength(1);
+      expect(await f.frames.next()).toEqual({
+        type: "ui.error",
+        sid: HTTP.sid,
+        code: "limit_exceeded",
+        message: "HTTP request bodies must not exceed 100 MiB.",
+      });
+      expect(f.handle.request).not.toHaveBeenCalled();
+    } finally {
+      admission.resolve(f.handle);
+    }
+    await f.receive({ ...HTTP, sid: "http0002" });
+    expect((await response(f)).head.status).toBe(200);
+  });
+
   it("streams HTTP chunks in both directions with unchanged paths, safe headers and read cookies", async () => {
     const f = setup();
     const upload = Buffer.alloc(512 * 1024, 3);

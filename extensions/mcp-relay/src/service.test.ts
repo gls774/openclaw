@@ -52,6 +52,24 @@ async function createGrant(f: Awaited<ReturnType<typeof fixture>>, grantId = "gr
 }
 
 describe("MCP relay transport and authority", () => {
+  it.each(["hello", "ui-unavailable", "ping"] as const)(
+    "closes a saturated relay when sending %s control frames",
+    async (kind) => {
+      const f = await fixture();
+      if (kind !== "hello") {
+        await f.ready();
+      }
+      f.socket.bufferedAmount = 32 * 1024 * 1024;
+      if (kind === "ping") {
+        await f.clock.advanceBy(30_000);
+      } else {
+        expect(() => f.socket.receive(kind === "hello" ? CHALLENGE : HTTP)).not.toThrow();
+      }
+      expect(f.socket.terminated).toBe(true);
+      await expect(f.service.status()).resolves.toMatchObject({ connected: false });
+    },
+  );
+
   it.each(["closed", "unsupported-auth"] as const)(
     "reopens a retired MCP binding after %s UI admission fails",
     async (code) => {

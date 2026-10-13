@@ -241,6 +241,13 @@ export class RelayService {
         );
       }
     };
+    const sendControlFrame = (frame: unknown) => {
+      try {
+        this.#send(socket, frame);
+      } catch {
+        socket.terminate();
+      }
+    };
     const armPongDeadline = () =>
       connection.schedule({
         id: "pong-deadline",
@@ -317,7 +324,7 @@ export class RelayService {
           Buffer.from(frame.nonce, "base64url").toString("base64url") === frame.nonce
         ) {
           helloSent = true;
-          this.#send(socket, {
+          sendControlFrame({
             type: "hello",
             protocol: 1,
             signature: identity.signChallenge(frame.nonce, frame.relay),
@@ -358,7 +365,7 @@ export class RelayService {
             everyMs: 30_000,
             run: () => {
               if (current()) {
-                this.#send(socket, { type: "ping" });
+                sendControlFrame({ type: "ping" });
               }
             },
           });
@@ -376,7 +383,7 @@ export class RelayService {
         if (this.#ui && uiStatus.available) {
           this.#ui.receive(frame);
         } else if (typeof frame.sid === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(frame.sid)) {
-          this.#send(socket, {
+          sendControlFrame({
             type: "ui.error",
             sid: frame.sid,
             code: "unavailable",

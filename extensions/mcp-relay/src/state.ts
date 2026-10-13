@@ -141,7 +141,7 @@ export class RelayState {
   }
 
   async #update<T>(action: () => Promise<T>): Promise<T> {
-    // Usage writes and revocations share an order so usage cannot restore a deleted row.
+    // Grant writes and revocations share an order so writes cannot restore a deleted row.
     const update = this.#updates.then(action);
     this.#updates = update.then(
       () => {},
@@ -181,37 +181,41 @@ export class RelayState {
     params: { grantId: string; codeHash: string; client: { id: string; name: string } },
     now: number,
   ): Promise<boolean> {
-    const value = await this.#store.consume(`code:${params.codeHash}`);
-    if (value === undefined) {
-      return false;
-    }
-    if (!isRecord(value)) {
-      throw stateError();
-    }
-    const code = parseAuthority(value);
-    // A crash after consuming a code requires a fresh pairing code, not recovery machinery.
-    const grant: RelayGrant = {
-      grantId: params.grantId,
-      clientId: params.client.id,
-      clientName: params.client.name,
-      createdAt: now,
-      principal: code.principal,
-      ceiling: code.ceiling,
-      ...(code.principalLabel === undefined ? {} : { principalLabel: code.principalLabel }),
-    };
-    await this.#store.register(`grant:${grant.grantId}`, grant);
-    this.#grants.set(grant.grantId, grant);
-    return true;
+    return this.#update(async () => {
+      const value = await this.#store.consume(`code:${params.codeHash}`);
+      if (value === undefined) {
+        return false;
+      }
+      if (!isRecord(value)) {
+        throw stateError();
+      }
+      const code = parseAuthority(value);
+      // A crash after consuming a code requires a fresh pairing code, not recovery machinery.
+      const grant: RelayGrant = {
+        grantId: params.grantId,
+        clientId: params.client.id,
+        clientName: params.client.name,
+        createdAt: now,
+        principal: code.principal,
+        ceiling: code.ceiling,
+        ...(code.principalLabel === undefined ? {} : { principalLabel: code.principalLabel }),
+      };
+      await this.#store.register(`grant:${grant.grantId}`, grant);
+      this.#grants.set(grant.grantId, grant);
+      return true;
+    });
   }
 
   async approveGrant(
     grant: Omit<RelayGrant, "lastUsedAt">,
     assertCommandCurrent: () => void,
   ): Promise<void> {
-    await this.#store.register(`grant:${grant.grantId}`, grant, {
-      assertCurrent: assertCommandCurrent,
+    return this.#update(async () => {
+      await this.#store.register(`grant:${grant.grantId}`, grant, {
+        assertCurrent: assertCommandCurrent,
+      });
+      this.#grants.set(grant.grantId, grant);
     });
-    this.#grants.set(grant.grantId, grant);
   }
 
   async authorize(grantId: string, now: number): Promise<Readonly<RelayGrant> | undefined> {

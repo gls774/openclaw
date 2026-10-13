@@ -561,9 +561,13 @@ describe.skipIf(process.platform === "win32")("native multi-invocation report ow
       expect(capture.modules).toEqual([]);
       expect(capture.ended?.reason).toBe("failed");
       expect(attempt.outcome).toMatchObject({ code: 1, signal: null });
-      expect(result.code, result.stderr).toBe(1);
-      expect(result.signal).toBeNull();
-      expect(index.complete).toBe(true);
+      // Both children refuse the empty selection, but their complete report is not an infrastructure failure.
+      expect(result, result.stderr).toMatchObject({ code: 1, signal: null });
+      expect(index).toMatchObject({
+        complete: true,
+        error: "",
+        merge: { code: 1, signal: null },
+      });
       expect(index.entries[1].attempts).toHaveLength(1);
       expect(index.entries[1].attempts[0].outcome).toMatchObject({ code: 1, signal: null });
       expect(fs.existsSync(output)).toBe(true);

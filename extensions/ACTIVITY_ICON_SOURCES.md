@@ -75,6 +75,9 @@ The following defaults reuse the corresponding files in [`ui/public/provider-ico
 | `xiaomi`                | `ProviderIcon-mimo.svg`        |
 | `zai`                   | `ProviderIcon-zai.svg`         |
 
+NetMind uses the official monochrome NetMind mark supplied for this integration;
+the source reference is embedded in [`netmind/assets/activity.svg`](netmind/assets/activity.svg).
+
 For LiteLLM, the small source stroke widths are unified at 1.35 source units before combining paths. Stepfun retains its base cutout mark and omits the duplicate gradient overlay. OpenRouter omits the redundant view-box clipping wrapper. Synthetic’s circle rotation around its own center is omitted; its position, radius, and parent transform are unchanged.
 
 ## Additional service marks

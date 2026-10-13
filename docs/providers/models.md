@@ -37,6 +37,7 @@ Pick a provider, authenticate, then set the default model as `provider/model`.
 - [MiniMax](/providers/minimax)
 - [Mistral](/providers/mistral)
 - [Moonshot AI (Kimi + Kimi Coding)](/providers/moonshot)
+- [NetMind](/providers/netmind)
 - [NovitaAI](/providers/novita)
 - [OpenAI (API + Codex)](/providers/openai)
 - [OpenCode (Zen + Go)](/providers/opencode)

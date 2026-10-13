@@ -408,7 +408,30 @@ describe("release:stable post-publication CLI", () => {
     },
   );
 
-  it("keeps closeout incomplete when the website refresh fails despite existing receipts", () => {
+  it("checks production again when a completed closeout is restarted", () => {
+    const release = fixture();
+    const state = postState("closeout");
+    state.closeout = { websiteRunId: "499", verifiedAt: state.startedAt };
+    release.seed(state);
+    const result = release.run(
+      [
+        ...closeoutMain(),
+        closeoutAssets(),
+        websiteDispatch(),
+        actionRun("openclaw/openclaw.ai", 503),
+      ],
+      ["--from", "closeout"],
+    );
+    expect(result.status, result.output).toBe(0);
+    expect(release.readState().closeout.websiteRunId).toBe("503");
+    expect(
+      result.calls.some((call) =>
+        call.args.includes("repos/openclaw/openclaw.ai/actions/runs/499"),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps closeout incomplete when the website verification fails despite existing receipts", () => {
     const release = fixture();
     release.seed(postState("closeout"));
     const result = release.run([
@@ -418,7 +441,7 @@ describe("release:stable post-publication CLI", () => {
       actionRun("openclaw/openclaw.ai", 503, "failure"),
     ]);
     expect(result.status, result.output).toBe(2);
-    expect(result.stderr).toContain("Website refresh 503 concluded failure");
+    expect(result.stderr).toContain("Website verification 503 concluded failure");
     expect(release.readState().phases.closeout.status).toBe("refused");
     expect(release.readState().closeout.verifiedAt).toBeUndefined();
     expect(release.readState().closeout.websiteRunId).toBeUndefined();

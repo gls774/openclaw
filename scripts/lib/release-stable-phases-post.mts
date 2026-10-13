@@ -387,12 +387,19 @@ async function closeoutAssetsPresent(ctx: ReleaseContext): Promise<boolean> {
   return expected.every((name) => assets.includes(name));
 }
 
-async function refreshWebsite(ctx: ReleaseContext): Promise<void> {
+async function verifyWebsite(ctx: ReleaseContext): Promise<void> {
   const repo = "openclaw/openclaw.ai";
   const workflow = "companion-downloads-deployed.yml";
+  // A phase restart retains prior receipts. A completed verification is history,
+  // not proof of the current download service; retain IDs only while unfinished.
+  if (ctx.state.closeout.verifiedAt) {
+    delete ctx.state.closeout.websiteRunId;
+    delete ctx.state.closeout.verifiedAt;
+    ctx.save();
+  }
   if (!ctx.state.closeout.websiteRunId) {
-    // Refresh only opens/updates a metadata PR and reads production. Repeating
-    // an unacknowledged dispatch is safe; the website serializes its owner job.
+    // Verification only reads production. Repeating
+    // an unacknowledged dispatch is safe; the website serializes its verification job.
     const result = await ctx.run(
       "gh",
       [
@@ -429,7 +436,7 @@ async function refreshWebsite(ctx: ReleaseContext): Promise<void> {
     });
     delete ctx.state.closeout.websiteRunId;
     ctx.save();
-    throw new ReleaseRefusal(`Website refresh ${runId} concluded ${String(run.conclusion)}.`, [
+    throw new ReleaseRefusal(`Website verification ${runId} concluded ${String(run.conclusion)}.`, [
       shellCommand("gh", ["run", "view", runId, "--repo", repo, "--log-failed"]),
       ctx.resume("closeout"),
     ]);
@@ -481,7 +488,7 @@ export async function closeout(ctx: ReleaseContext): Promise<void> {
     );
   }
   if (await closeoutAssetsPresent(ctx)) {
-    await refreshWebsite(ctx);
+    await verifyWebsite(ctx);
     state.closeout.verifiedAt = new Date().toISOString();
     ctx.save();
     return;
@@ -518,7 +525,7 @@ export async function closeout(ctx: ReleaseContext): Promise<void> {
       ],
     );
   }
-  await refreshWebsite(ctx);
+  await verifyWebsite(ctx);
   state.closeout.verifiedAt = new Date().toISOString();
   ctx.save();
 }

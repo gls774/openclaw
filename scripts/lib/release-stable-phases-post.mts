@@ -421,7 +421,9 @@ async function verifyWebsite(ctx: ReleaseContext): Promise<void> {
       { dryRunStdout: "503" },
     );
     const runId = result.stdout.trim();
-    if (!/^[1-9][0-9]*$/.test(runId)) throw new Error("Website dispatch did not return a run ID.");
+    if (!/^[1-9][0-9]*$/.test(runId)) {
+      throw new Error("Website dispatch did not return a run ID.");
+    }
     ctx.state.closeout.websiteRunId = runId;
     ctx.save();
   }

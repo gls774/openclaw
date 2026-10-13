@@ -5,6 +5,7 @@ import type {
   GatewayIngressSocketV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import type { PluginServiceSchedulerV1 } from "openclaw/plugin-sdk/plugin-entry";
+import { isRetiredBindingError } from "./grant-bindings.js";
 import { UiRequestBody } from "./ui-tunnel-body.js";
 import {
   chunkBytes,
@@ -31,6 +32,7 @@ type Options = {
   assertGrantCurrent: (grantId: string) => void;
   send: (frame: unknown) => void;
   closeRelay: () => void;
+  retireBinding?: (grantId: string) => void;
 };
 type Grant = {
   id: string;
@@ -136,15 +138,19 @@ export class UiTunnel {
   }
 
   revoke(grantId: string): void {
+    this.retire(
+      grantId,
+      new UiTunnelError(
+        "grant_revoked",
+        "This connection was revoked. Pair OpenClaw again to reconnect.",
+      ),
+    );
+  }
+
+  retire(grantId: string, error: Error): void {
     const grant = this.#grants.get(grantId);
     if (grant) {
-      void this.#retire(
-        grant,
-        new UiTunnelError(
-          "grant_revoked",
-          "This connection was revoked. Pair OpenClaw again to reconnect.",
-        ),
-      );
+      void this.#retire(grant, error);
     }
   }
 
@@ -204,9 +210,12 @@ export class UiTunnel {
       }),
     };
     this.#grants.set(grant.id, grant);
-    void grant.handle.catch(() => {
+    void grant.handle.catch((error: unknown) => {
       if (this.#grants.get(grant.id) === grant) {
         this.#grants.delete(grant.id);
+        if (isRetiredBindingError(error)) {
+          this.#options.retireBinding?.(grant.id);
+        }
       }
     });
     return grant;
@@ -234,6 +243,15 @@ export class UiTunnel {
   #fail(sid: string, error: unknown): void {
     let cause = error;
     const stream = this.#streams.get(sid);
+    if (
+      stream &&
+      this.#grants.get(stream.grant.id) === stream.grant &&
+      isRetiredBindingError(error)
+    ) {
+      this.#options.retireBinding?.(stream.grant.id);
+      void this.#retire(stream.grant, error);
+      return;
+    }
     if (stream) {
       try {
         this.#options.assertGrantCurrent(stream.grant.id);
@@ -441,6 +459,9 @@ export class UiTunnel {
     const kind = text ? "text" : "binary";
     if (stream.partial && stream.partial.kind !== kind) {
       invalid("WebSocket fragments must use the same data type.");
+    }
+    if ((stream.partial?.bytes.byteLength ?? 0) + bytes.byteLength > 25 * 1024 * 1024) {
+      throw new UiTunnelError("limit_exceeded", "WebSocket messages must not exceed 25 MiB.");
     }
     const complete = stream.partial ? Buffer.concat([stream.partial.bytes, bytes]) : bytes;
     stream.partial = { kind, bytes: complete };

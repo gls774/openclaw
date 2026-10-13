@@ -7,7 +7,7 @@ import { WebSocket, type RawData } from "openclaw/plugin-sdk/websocket-runtime";
 import { ownsGrant, type RelayCaller } from "./caller.js";
 import { RelayConsent } from "./consent.js";
 import type { GatewayRequest } from "./gateway-request.js";
-import { GrantBindings, principalFactory } from "./grant-bindings.js";
+import { GrantBindings, isRetiredBindingError, principalFactory } from "./grant-bindings.js";
 import {
   capResult,
   codeHash,
@@ -20,10 +20,11 @@ import {
   readGrantCreation,
 } from "./protocol.js";
 import type { RelayState, RelayGrantAuthority } from "./state.js";
-import { readUiFrameAncestors } from "./ui-tunnel-protocol.js";
+import { readUiFrameAncestors, UiTunnelError } from "./ui-tunnel-protocol.js";
 import { UiTunnel } from "./ui-tunnel.js";
 
 export type RelaySocket = {
+  readonly bufferedAmount: number;
   on(event: "message", listener: (data: RawData, binary: boolean) => void): void;
   on(event: "close", listener: (code: number, reason: Buffer) => void): void;
   on(event: "error", listener: (error: Error) => void): void;
@@ -335,6 +336,7 @@ export class RelayService {
               open: async (grantId, presentation) =>
                 (await bindings.get(grantId)).openControlUi(presentation),
               frameAncestors,
+              retireBinding: (grantId) => void bindings.revoke(grantId),
               scheduler: connection,
               assertGrantCurrent: (grantId) => {
                 assertConnectionCurrent();
@@ -454,6 +456,10 @@ export class RelayService {
 
   #send(socket: RelaySocket, frame: unknown): void {
     const text = JSON.stringify(frame);
+    // A saturated relay may also lose the terminal error and reconnect instead.
+    if (socket.bufferedAmount + Buffer.byteLength(text) > 32 * 1024 * 1024) {
+      throw new UiTunnelError("limit_exceeded", "The relay send queue exceeded 32 MiB.");
+    }
     socket.send(text);
   }
 
@@ -531,7 +537,17 @@ export class RelayService {
         op,
         params,
         assertAuthority,
-        binding.request.bind(binding),
+        async (...args) => {
+          try {
+            return await binding.request(...args);
+          } catch (error) {
+            if (isRetiredBindingError(error)) {
+              this.#ui?.retire(grantId, error);
+              await bindings.revoke(grantId);
+            }
+            throw error;
+          }
+        },
       );
       return op === "status" && isRecord(result) ? { ...result, ui: this.#uiStatus() } : result;
     }

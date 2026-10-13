@@ -10,10 +10,7 @@ import {
   createTestPluginApi,
   createTestPluginServiceScheduler,
 } from "../plugin-sdk/plugin-test-api.js";
-import {
-  createPluginStateKeyedStore,
-  type OpenAsyncKeyedStoreOptions,
-} from "../plugin-state/plugin-state-store.js";
+import { createPluginStateRuntimeStores } from "../plugin-state/plugin-state-store.js";
 import type {
   GatewayControlUiIngressFactoryV2,
   GatewayControlUiIngressOpenOptionsV2,
@@ -215,10 +212,9 @@ export async function expectMcpRelayPrincipalAuthority(params: {
         const clock = createGatewaySchedulerClock(Date.now());
         const scheduler = createTestPluginServiceScheduler(createTestGatewayScheduler(clock.clock));
         const runtime = createLazyPluginRuntime({});
-        runtime.state.openKeyedStore = <T>(options: OpenAsyncKeyedStoreOptions) =>
-          createPluginStateKeyedStore<T>("mcp-relay", options, () =>
-            scheduler.signal.throwIfAborted(),
-          );
+        runtime.state.openKeyedStoreV2 = createPluginStateRuntimeStores("mcp-relay", () =>
+          scheduler.signal.throwIfAborted(),
+        ).openKeyedStoreV2;
         const methods: GatewayMethodDescriptor[] = [];
         const errors: string[] = [];
         let service: OpenClawPluginServiceV2 | undefined;
@@ -453,9 +449,7 @@ export async function expectMcpRelayPrincipalAuthority(params: {
                 waitMs: 0,
               }),
             ).toMatchObject({ ok: false });
-            expect(errors).toContainEqual(
-              expect.stringContaining("method=chat.send FORBIDDEN: missing scope: operator.write"),
-            );
+            expect(errors).toContainEqual("mcp-relay: op=message.send method=chat.send failed");
           }
           relay.receive({
             type: "req",

@@ -1,9 +1,17 @@
-import type {
-  GatewayControlUiIngressFactoryV2,
-  GatewayIngressPrincipalBindingV1,
+import {
+  GatewayControlUiIngressError,
+  type GatewayControlUiIngressFactoryV2,
+  type GatewayIngressPrincipalBindingV1,
 } from "openclaw/plugin-sdk/gateway-ingress";
 import { RelayError } from "./protocol.js";
 import type { RelayState } from "./state.js";
+
+export function isRetiredBindingError(error: unknown): error is GatewayControlUiIngressError {
+  return (
+    error instanceof GatewayControlUiIngressError &&
+    (error.code === "closed" || error.code === "forbidden")
+  );
+}
 
 export function principalFactory(
   factory: GatewayControlUiIngressFactoryV2 | undefined,

@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import {
   GatewayControlUiIngressError,
   type GatewayControlUiIngressV2,
@@ -15,6 +16,7 @@ import {
   ORIGINS,
   PUBLIC_KEY,
   SIGNATURE,
+  WS,
 } from "./relay.test-helpers.js";
 import type { RelayGrantAuthority } from "./state.js";
 
@@ -50,6 +52,61 @@ async function createGrant(f: Awaited<ReturnType<typeof fixture>>, grantId = "gr
 }
 
 describe("MCP relay transport and authority", () => {
+  it("reopens a retired MCP binding after the first UI admission fails", async () => {
+    const ingress = createPrincipalIngress({
+      presentation: { ...ORIGINS, basePath: "/control", operatorScopeCeiling: ["operator.read"] },
+      request: async () => ({ response: new Response("UI"), pluginReadCookies: [] }),
+      openWebSocket: async () => ({ socket: new IngressSocket() }),
+      close: async () => {},
+    });
+    const f = await fixture(undefined, { controlUiIngress: ingress.factory });
+    await createGrant(f);
+    await f.ready(f.socket, uiCapability);
+    expect(
+      await f.request({ id: "status", op: "status", grantId: "gr_one", params: {} }),
+    ).toMatchObject({ ok: true });
+    await ingress.bindings[0]!.binding.close();
+    f.socket.receive(HTTP);
+    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.error", code: "unavailable" });
+    f.socket.receive({ ...HTTP, sid: "fresh-ui" });
+    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.head", status: 200 });
+    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.body", b64: "VUk=" });
+    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.http.body", more: false });
+    expect(ingress.factory.bindPrincipal).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])("fails an overloaded UI send (saturated=%s)", async (saturated) => {
+    const socket = new IngressSocket();
+    const ingress = createPrincipalIngress({
+      presentation: { ...ORIGINS, basePath: "/control", operatorScopeCeiling: ["operator.read"] },
+      request: async () => ({ response: new Response("UI"), pluginReadCookies: [] }),
+      openWebSocket: async () => ({ socket }),
+      close: async () => socket.close(),
+    });
+    const f = await fixture(undefined, { controlUiIngress: ingress.factory });
+    await createGrant(f);
+    await f.ready(f.socket, uiCapability);
+    f.socket.receive(WS);
+    expect(await f.socket.nextFrame()).toMatchObject({ type: "ui.ws.opened" });
+    f.socket.bufferedAmount = 32 * 1024 * 1024 - (saturated ? 0 : 1024);
+    const relayClosed = saturated ? once(f.socket, "close") : undefined;
+    socket.incoming.push({ kind: "text", text: "x".repeat(1024) });
+    await f.clock.advanceBy(0);
+    if (saturated) {
+      await relayClosed;
+      expect(f.socket.terminated).toBe(true);
+    } else {
+      expect(await f.socket.nextFrame()).toMatchObject({
+        type: "ui.error",
+        sid: WS.sid,
+        code: "limit_exceeded",
+      });
+      expect(f.socket.terminated).toBe(false);
+    }
+    expect(socket.closes[0]?.code).toBe(1011);
+    expect(f.socket.frames.some((frame) => frame.type === "ui.ws.msg")).toBe(false);
+  });
+
   it("caps operation results at the relay publication boundary", async () => {
     const f = await fixture(async () => ({ text: "x".repeat(512 * 1024) }));
     await createGrant(f);

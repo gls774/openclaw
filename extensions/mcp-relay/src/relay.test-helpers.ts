@@ -142,6 +142,7 @@ class FakeRelaySocket extends EventEmitter implements RelaySocket {
   readonly #queue: Record<string, unknown>[] = [];
   readonly #readers: ((frame: Record<string, unknown>) => void)[] = [];
   terminated = false;
+  bufferedAmount = 0;
 
   send(data: Parameters<RelaySocket["send"]>[0]): void {
     if (typeof data !== "string") {

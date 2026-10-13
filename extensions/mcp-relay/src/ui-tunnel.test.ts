@@ -214,6 +214,55 @@ describe("Control UI relay tunnel", () => {
     expect(received).toBe(text);
   });
 
+  it.each(["text", "binary"] as const)(
+    "bounds assembled %s messages at 25 MiB and closes only the oversized socket",
+    async (kind) => {
+      const f = setup();
+      const socket = await opened(f);
+      const chunk =
+        kind === "text"
+          ? { text: "x".repeat(512 * 1024) }
+          : {
+              b64: Buffer.alloc(512 * 1024).toString("base64"),
+            };
+      for (let i = 0; i < 50; i++) {
+        await f.receive({ type: "ui.ws.msg", sid: WS.sid, ...chunk, more: i < 49 });
+      }
+      const message = await socket.sent.next();
+      expect(
+        message.kind === "text" ? Buffer.byteLength(message.text) : message.bytes.byteLength,
+      ).toBe(25 * 1024 * 1024);
+      for (let i = 0; i < 50; i++) {
+        await f.receive({ type: "ui.ws.msg", sid: WS.sid, ...chunk, more: true });
+      }
+      await f.receive({ type: "ui.ws.msg", sid: WS.sid, ...chunk, more: false });
+      expect(await f.frames.next()).toMatchObject({
+        type: "ui.error",
+        sid: WS.sid,
+        code: "limit_exceeded",
+        message: "WebSocket messages must not exceed 25 MiB.",
+      });
+      expect(socket.closes[0]?.code).toBe(1011);
+      expect(socket.sent.values).toHaveLength(1);
+      await f.receive(HTTP);
+      expect((await response(f)).head.status).toBe(200);
+    },
+  );
+
+  it("evicts a retired UI handle before the next open", async () => {
+    const f = setup();
+    await f.receive(HTTP);
+    await response(f);
+    vi.mocked(f.handle.request).mockRejectedValueOnce(
+      new GatewayControlUiIngressError("closed", "Remote Control UI ingress is closed."),
+    );
+    await f.receive({ ...HTTP, sid: "stale001" });
+    expect(await f.frames.next()).toMatchObject({ type: "ui.error", code: "unavailable" });
+    await f.receive({ ...HTTP, sid: "fresh001" });
+    expect((await response(f)).head.status).toBe(200);
+    expect(f.open).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects sandbox socket opens without rewriting browser origins", async () => {
     const f = setup();
     await f.receive({ ...WS, origin: ORIGINS.sandboxOrigin });

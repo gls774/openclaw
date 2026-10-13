@@ -182,6 +182,10 @@ export class RelayState {
     now: number,
   ): Promise<boolean> {
     return this.#update(async () => {
+      // Active IDs keep their authority because principal bindings are cached by grant ID.
+      if (this.getGrant(params.grantId)) {
+        throw new RelayError("invalid_params", "This grant ID is already connected.");
+      }
       const value = await this.#store.consume(`code:${params.codeHash}`);
       if (value === undefined) {
         return false;

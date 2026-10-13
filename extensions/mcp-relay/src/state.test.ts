@@ -3,6 +3,35 @@ import { describe, expect, it } from "vitest";
 import { CLIENT, createStateFixture } from "./relay.test-helpers.js";
 
 describe("MCP relay persisted state", () => {
+  it("preserves active grant authority and its rejected replacement code across restart", async () => {
+    const f = createStateFixture();
+    const state = f.open();
+    await state.initialize();
+    await state.issue("owner-code", 1_000, 0);
+    await state.createGrant({ grantId: "active", codeHash: "owner-code", client: CLIENT }, 0);
+    const replacementAuthority = {
+      principal: { kind: "person", profileId: "new-person" },
+      ceiling: ["operator.read"],
+    } as const;
+    await state.issue("replacement-code", 1_000, 0, undefined, replacementAuthority);
+    await expect(
+      state.createGrant({ grantId: "active", codeHash: "replacement-code", client: CLIENT }, 0),
+    ).rejects.toMatchObject({ code: "invalid_params" });
+
+    const restarted = f.open();
+    await restarted.initialize();
+    for (const current of [state, restarted]) {
+      expect(current.getGrant("active")).toMatchObject({
+        principal: { kind: "owner" },
+        ceiling: ["operator.read", "operator.write"],
+      });
+    }
+    await expect(
+      restarted.createGrant({ grantId: "fresh", codeHash: "replacement-code", client: CLIENT }, 0),
+    ).resolves.toBe(true);
+    expect(restarted.getGrant("fresh")).toMatchObject(replacementAuthority);
+  });
+
   it.each(["pairing code", "approval"] as const)(
     "keeps a revocation after pending %s grant persistence and restart",
     async (source) => {

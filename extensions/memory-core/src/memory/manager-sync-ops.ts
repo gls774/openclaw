@@ -400,10 +400,13 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
             needsFullReindex = true;
             this.beginSyncProviderGeneration();
             await this.runInPlaceReindex(progress);
+          } else {
+            this.requestSessionIndexRetry(true);
           }
           return;
         }
         if (!this.provider && this.fts.enabled && isMemoryEmbeddingOperationError(err)) {
+          this.requestSessionIndexRetry();
           this.syncOutcomes.recordActiveFailure(err);
           log.warn(`memory embeddings unavailable; leaving memory index dirty: ${reason}`);
           return;
@@ -463,6 +466,7 @@ export abstract class MemoryManagerSyncOps extends MemoryManagerSourceSyncOps {
     this.sessionsDirty =
       sessionsFullRetryDirty || sessionsReconcileDirty || sessionsDirtyFiles.size > 0;
     if (failure) {
+      this.requestSessionIndexRetry(true);
       this.syncOutcomes.recordActiveFailure(failure.error);
     }
     return true;

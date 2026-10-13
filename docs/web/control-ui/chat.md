@@ -159,6 +159,19 @@ yours. Viewers can read the chips; adding or toggling requires permission to
 send or suggest in that session. See
 [Multi-user reactions](/concepts/multi-user#reactions) for agent and channel behavior.
 
+## Session Details
+
+**Details** brings session context and task progress together beside the conversation.
+On wide chat panes it opens automatically as a docked right-hand column, with
+the transcript and composer centered in the remaining space. Docking uses the
+space left after navigation, split panes, and other panels—not the window width
+alone. The column scrolls independently and never covers the conversation.
+
+When the pane becomes too narrow, automatically opened Details collapses. Select
+**Details** to open it as an overlay on narrower screens. Closing it explicitly
+keeps it closed while that conversation remains open, including through progress
+updates, resizing, and temporarily hiding its pane. Selecting **Details** reopens it.
+
 ## Session rail and side chat
 
 While you watch a running session, the Gateway shows the model's latest safe preamble immediately as the session headline. When a utility model is available, it can replace that headline with a richer compact status digest after enough activity accumulates. Chat carries the result in a **session rail**: its compact pill shows the live digest, while the expanded rail shows pull requests, elapsed time, and a read-only Side chat thread. The rail can expand once when a run becomes stuck or needs input, and done or failed runs keep a frozen “finished” time based on the final digest. On wide chat panes the expanded rail docks as a 400 px right column; on narrower and mobile layouts it remains an overlay.
